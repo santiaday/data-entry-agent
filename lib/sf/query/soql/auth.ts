@@ -41,14 +41,48 @@ export class SalesforceAuthError extends Error {
   }
 }
 
+function readEnv(key: string): string | null {
+  const v = process.env[key];
+  return v && v.trim() ? v.trim() : null;
+}
+
+/** Load the SF private key from env: SF_PRIVATE_KEY_BASE64 (preferred) or SF_PRIVATE_KEY. */
+function loadPrivateKeyFromEnv(): string | null {
+  const b64 = readEnv('SF_PRIVATE_KEY_BASE64');
+  if (b64) return Buffer.from(b64, 'base64').toString('utf8');
+  const raw = process.env.SF_PRIVATE_KEY;
+  if (raw && raw.trim()) {
+    // Support both real newlines and \n-escaped single-line values.
+    return raw.includes('\\n') ? raw.replace(/\\n/g, '\n') : raw;
+  }
+  return null;
+}
+
+/** Read SF credentials from environment variables, or null if not fully set. */
+function loadSalesforceCredentialsFromEnv(): SalesforceCredentials | null {
+  const instanceUrl = readEnv('SF_INSTANCE_URL');
+  const clientId = readEnv('SF_CLIENT_ID');
+  const username = readEnv('SF_USERNAME');
+  const privateKey = loadPrivateKeyFromEnv();
+  if (instanceUrl && clientId && username && privateKey) {
+    return { instanceUrl, clientId, username, privateKey };
+  }
+  return null;
+}
+
 /**
- * Load an org's SF credentials from Supabase. Returns null when the
- * credentials are not configured (caller decides how to handle).
+ * Load an org's SF credentials. Environment variables take precedence
+ * (SF_INSTANCE_URL, SF_CLIENT_ID, SF_USERNAME, SF_PRIVATE_KEY[_BASE64]); if
+ * they are not fully set we fall back to the `orgs` row. Returns null when
+ * credentials are configured in neither place.
  */
 export async function loadSalesforceCredentials(
   supabase: SupabaseClient,
   orgId: string,
 ): Promise<SalesforceCredentials | null> {
+  const fromEnv = loadSalesforceCredentialsFromEnv();
+  if (fromEnv) return fromEnv;
+
   const { data, error } = await supabase
     .from('orgs')
     .select('sf_instance_url, sf_client_id, sf_private_key, sf_username')

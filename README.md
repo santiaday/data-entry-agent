@@ -17,10 +17,16 @@ It ships with a web console to:
 - **Queue** — webhook-driven processing with a delay (so Gong call processing can
   finish before extraction runs)
 
-> **No authentication.** This build is single-user with no login — anyone who can
-> reach the URL has full access, including the ability to write to Salesforce. Put
-> it behind your platform's access controls / a private network, or don't expose it
-> publicly. (Auth was intentionally removed; see `lib/auth.ts` to reintroduce it.)
+> **Access control.** There are no user accounts. Set `APP_ACCESS_PASSWORD` to put
+> the whole app behind a single shared password (one login, one cookie); leave it
+> unset to run fully open. Either way, the app acts with full privileges once you're
+> in — including writing to Salesforce — so also rely on your platform's network/
+> access controls if it's internet-reachable.
+
+> **Credentials live in env vars.** Salesforce, Gong, and Outreach credentials are
+> read from environment variables first (falling back to the `orgs` table if unset).
+> Keeping the Salesforce private key in env keeps it out of the database and its
+> backups. See `.env.example`.
 
 ## Stack
 
@@ -45,10 +51,11 @@ its tables on first start. To apply them manually instead:
 pnpm migrate          # applies supabase/migrations/*.sql, tracked in _migrations
 ```
 
-Then add your integration credentials: copy `supabase/seed.example.sql` to
-`seed.sql`, fill in the Salesforce (and optional Gong/Outreach) values, and run it
-against the database. Credentials live in the `orgs` table — **not** in
-environment variables.
+Then add your integration credentials. **Preferred:** set them as environment
+variables (`SF_*`, `GONG_*`, `OUTREACH_*` — see `.env.example`); this keeps the
+Salesforce private key out of the database. **Alternatively**, copy
+`supabase/seed.example.sql` to `seed.sql`, fill in the values, and run it against
+the database (the `orgs` row is the fallback when env vars are unset).
 
 > The migration SQL lives under `supabase/migrations/` for historical reasons —
 > it's plain PostgreSQL and has no dependency on Supabase.

@@ -38,6 +38,14 @@ const TOKEN_URL = 'https://api.outreach.io/oauth/token';
 const SCOPES = ['mailings.read'];
 
 async function loadCreds(): Promise<{ clientId: string; clientSecret: string }> {
+  // Prefer environment variables (the recommended place for credentials).
+  const envId = process.env.OUTREACH_CLIENT_ID?.trim();
+  const envSecret = process.env.OUTREACH_CLIENT_SECRET?.trim();
+  if (envId && envSecret) {
+    return { clientId: envId, clientSecret: envSecret };
+  }
+
+  // Fall back to the orgs row.
   const { data, error } = await supabase
     .from('orgs')
     .select('outreach_client_id, outreach_client_secret')
@@ -49,8 +57,8 @@ async function loadCreds(): Promise<{ clientId: string; clientSecret: string }> 
   }
   if (!data.outreach_client_id || !data.outreach_client_secret) {
     throw new Error(
-      'Outreach client_id/secret are not set in the orgs row. ' +
-        'Run supabase/seed-credentials.sql first.',
+      'Outreach client_id/secret are not set. Provide OUTREACH_CLIENT_ID and ' +
+        'OUTREACH_CLIENT_SECRET as environment variables (or in the orgs row).',
     );
   }
   return {
@@ -144,17 +152,6 @@ async function exchangeCode(
   };
 }
 
-async function persistRefreshToken(refreshToken: string): Promise<void> {
-  const { error } = await supabase
-    .from('orgs')
-    .update({ outreach_refresh_token: refreshToken })
-    .eq('id', ORG_ID);
-
-  if (error) {
-    throw new Error(`Failed to update orgs.outreach_refresh_token: ${error.message}`);
-  }
-}
-
 async function main(): Promise<void> {
   console.log('[outreach-oauth] Loading client credentials from local DB…');
   const { clientId, clientSecret } = await loadCreds();
@@ -187,12 +184,12 @@ async function main(): Promise<void> {
     }
   }
 
-  await persistRefreshToken(tokens.refreshToken);
-
-  console.log(`\n✓ Done. New refresh_token saved to orgs.outreach_refresh_token.`);
-  console.log(`  Access token expires in ${tokens.expiresIn}s (runtime refreshes as needed).\n`);
+  console.log(`\n✓ Done. Set this as an environment variable:\n`);
+  console.log(`  OUTREACH_REFRESH_TOKEN=${tokens.refreshToken}\n`);
+  console.log(`  Access token expires in ${tokens.expiresIn}s (runtime refreshes as needed).`);
+  console.log(`  (Also ensure OUTREACH_CLIENT_ID and OUTREACH_CLIENT_SECRET are set.)\n`);
   console.log(`Verify by re-running a batch:`);
-  console.log(`  pnpm data-entry -- --record-id 006QU00000EcbOHYAZ --object-type Opportunity --dry-run`);
+  console.log(`  pnpm backfill -- --record-id 006QU00000EcbOHYAZ --object-type Opportunity --dry-run`);
   console.log(`\nYou should see "[fetch] outreachMailings: ok" instead of the 403.`);
 }
 
