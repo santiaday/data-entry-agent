@@ -7,6 +7,10 @@
 -- Gong, Outreach) read by the extraction pipeline.
 -- ============================================================
 
+-- gen_random_uuid() is built in on Postgres 13+, but pgcrypto provides it on
+-- older versions and is a no-op if already present.
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
+
 CREATE TABLE IF NOT EXISTS public.orgs (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   name text,

@@ -1,21 +1,17 @@
 import { config } from 'dotenv';
-import { createClient, type SupabaseClient } from '@supabase/supabase-js';
 import * as path from 'node:path';
+import type { SupabaseClient } from '@supabase/supabase-js';
+import { createPgRestClient } from '@/lib/db/pg-rest';
 
-// Used only by the backfill CLI (scripts/backfill.ts / `pnpm backfill`).
-// Loads env from the repo root: .env.local first, then .env as a fallback.
+// Used by the backfill / OAuth CLIs (scripts/*). Loads env from the repo root:
+// .env.local first, then .env as a fallback.
 const cwd = process.cwd();
 config({ path: path.join(cwd, '.env.local') });
 config({ path: path.join(cwd, '.env') });
 
-const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
-const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
-
-if (!url || !key) {
-  throw new Error(
-    'Missing NEXT_PUBLIC_SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY in .env.local',
-  );
+if (!process.env.DATABASE_URL) {
+  throw new Error('Missing DATABASE_URL in .env.local / .env');
 }
 
-export const supabase: SupabaseClient = createClient(url, key);
+export const supabase = createPgRestClient() as unknown as SupabaseClient;
 export const ORG_ID = '00000000-0000-0000-0000-000000000001';

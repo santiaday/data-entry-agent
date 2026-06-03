@@ -32,6 +32,8 @@ RUN addgroup --system --gid 1001 nodejs \
 COPY --from=builder /app/public ./public
 COPY --from=builder --chown=nextjs:nodejs /app/.next/standalone ./
 COPY --from=builder --chown=nextjs:nodejs /app/.next/static ./.next/static
+# SQL migrations — read at boot by the instrumentation hook (runMigrations).
+COPY --from=builder --chown=nextjs:nodejs /app/supabase ./supabase
 
 USER nextjs
 EXPOSE 3000

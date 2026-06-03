@@ -22,3 +22,6 @@ dist
 npm-debug.log*
 .vercel
 coverage
+
+# typescript build info
+*.tsbuildinfo

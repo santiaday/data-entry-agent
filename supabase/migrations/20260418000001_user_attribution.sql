@@ -1,31 +1,18 @@
 -- =================================================
--- Per-user attribution (LOCAL-DEV slim version)
+-- Per-user attribution columns
 -- =================================================
--- The prod version of this migration also alters public.messages,
--- public.ingest_log, public.query_log, public.conversations, and
--- public.reports — but those tables don't exist in the local-dev
--- subset that runs data-entry batches. This slim version touches
--- only the de_* tables that the pipeline actually writes to.
---
--- (The original multi-table version lived in a larger monorepo.)
--- and is not needed by this standalone build.
+-- Adds a nullable user_id to the de_* tables the pipeline writes to. This
+-- standalone build has no authentication, so user_id is always NULL and there
+-- is no foreign key to an auth schema — the column exists only so the original
+-- code paths and per-user analytics indexes are preserved.
 
 -- ── 1. Add user_id columns ────────────────────────
 
-alter table public.de_batches
-  add column if not exists user_id uuid references auth.users(id) on delete set null;
-
-alter table public.de_runs
-  add column if not exists user_id uuid references auth.users(id) on delete set null;
-
-alter table public.de_extractions
-  add column if not exists user_id uuid references auth.users(id) on delete set null;
-
-alter table public.de_prompts
-  add column if not exists user_id uuid references auth.users(id) on delete set null;
-
-alter table public.de_field_configs
-  add column if not exists user_id uuid references auth.users(id) on delete set null;
+alter table public.de_batches      add column if not exists user_id uuid;
+alter table public.de_runs         add column if not exists user_id uuid;
+alter table public.de_extractions  add column if not exists user_id uuid;
+alter table public.de_prompts      add column if not exists user_id uuid;
+alter table public.de_field_configs add column if not exists user_id uuid;
 
 -- ── 2. Indexes for per-user analytics ─────────────
 

@@ -23,7 +23,7 @@ export async function GET(
   const [runRes, extractionsRes] = await Promise.all([
     supabase
       .from('de_runs')
-      .select('*, de_batches!inner(trigger_type, soql_query, dry_run)')
+      .select('*')
       .eq('id', id)
       .eq('org_id', ctx.orgId)
       .maybeSingle(),
@@ -42,6 +42,19 @@ export async function GET(
 
   if (!runRes.data) {
     return NextResponse.json({ error: 'Run not found', code: 'NOT_FOUND' }, { status: 404 });
+  }
+
+  // Attach the parent batch (originally a PostgREST embedded resource).
+  const run = runRes.data as Record<string, unknown> & { batch_id?: string | null };
+  if (run.batch_id) {
+    const batchRes = await supabase
+      .from('de_batches')
+      .select('trigger_type, soql_query, dry_run')
+      .eq('id', run.batch_id)
+      .maybeSingle();
+    run.de_batches = batchRes.data ?? null;
+  } else {
+    run.de_batches = null;
   }
 
   // Compute summary stats by batch

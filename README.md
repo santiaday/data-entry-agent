@@ -25,29 +25,37 @@ It ships with a web console to:
 ## Stack
 
 - Next.js 15 (App Router) + React 19 + Tailwind
-- Supabase (Postgres) for all state and configuration
+- PostgreSQL for all state and configuration (any Postgres — RDS, DeployBay, local)
 - OpenAI for extraction/summarization
 - Salesforce JWT Bearer Flow for read + write (no interactive login)
+
+The app talks to Postgres directly via a single `DATABASE_URL`. Database access
+goes through a small PostgREST-compatible adapter (`lib/db/pg-rest.ts`), so there
+is no Supabase or other service dependency.
 
 ## Setup
 
 ### 1. Database
 
-Create a Supabase project (or any Postgres) and apply the migrations in
-`supabase/migrations/` in filename order. With the [Supabase CLI](https://supabase.com/docs/guides/local-development):
+Point `DATABASE_URL` at any PostgreSQL database. **Migrations apply
+automatically on server boot** (via `instrumentation.ts`) — the app creates all
+its tables on first start. To apply them manually instead:
 
 ```bash
-supabase link --project-ref <your-ref>
-supabase db push
+pnpm migrate          # applies supabase/migrations/*.sql, tracked in _migrations
 ```
 
 Then add your integration credentials: copy `supabase/seed.example.sql` to
-`seed.sql`, fill in the Salesforce (and optional Gong/Outreach) values, and run it.
-Credentials live in the `orgs` table — **not** in environment variables.
+`seed.sql`, fill in the Salesforce (and optional Gong/Outreach) values, and run it
+against the database. Credentials live in the `orgs` table — **not** in
+environment variables.
+
+> The migration SQL lives under `supabase/migrations/` for historical reasons —
+> it's plain PostgreSQL and has no dependency on Supabase.
 
 ### 2. Environment
 
-Copy `.env.example` to `.env.local` and fill in Supabase + OpenAI values.
+Copy `.env.example` to `.env.local` and fill in `DATABASE_URL` + `OPENAI_API_KEY`.
 
 ### 3. Run locally
 
@@ -106,8 +114,10 @@ docker run -p 3000:3000 --env-file .env.local data-entry-agent
 ```
 
 For DeployBay (or any platform that builds from a GitHub repo + Dockerfile): point it
-at this repository and set the environment variables from `.env.example` in the
-platform's config. The container listens on `PORT` (default 3000).
+at this repository, **enable the PostgreSQL database** (it injects `DATABASE_URL`),
+and set the remaining environment variables from `.env.example` in the platform's
+config. Migrations run automatically on first boot. The container listens on `PORT`
+(default 3000).
 
 ## Project layout
 
@@ -120,9 +130,11 @@ lib/
   pipeline/          The extraction pipeline (fetch → extract → validate → write → log)
   sf/                Salesforce auth (JWT) + read-only SOQL validation/execution
   auth.ts            Single-user full-access context (no login)
-  supabase/          Server + service-role Supabase clients
+  db/                Postgres pool + PostgREST-compatible query adapter + migrator
+  supabase/          Thin client factories (return the pg adapter)
 scripts/
   backfill.ts        CLI entrypoint
+  migrate.ts         Apply migrations manually (pnpm migrate)
   outreach-oauth.ts  One-time helper to obtain an Outreach refresh token
 supabase/migrations/ Database schema
 ```

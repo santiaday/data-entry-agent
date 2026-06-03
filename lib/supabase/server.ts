@@ -1,38 +1,20 @@
-import { createServerClient, type CookieOptions } from '@supabase/ssr';
-import { cookies } from 'next/headers';
+/**
+ * Database clients.
+ *
+ * This deployment uses a plain PostgreSQL database (DATABASE_URL) rather than
+ * Supabase, so both clients return the local PostgREST-compatible adapter
+ * (see lib/db/pg-rest.ts) cast to the Supabase client type. The two factory
+ * names are kept so call sites are unchanged; there is no auth/RLS distinction
+ * here — the single DB user has full access.
+ */
 
-export async function createClient() {
-  const cookieStore = await cookies();
+import type { SupabaseClient } from '@supabase/supabase-js';
+import { createPgRestClient } from '@/lib/db/pg-rest';
 
-  return createServerClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
-    {
-      cookies: {
-        getAll() {
-          return cookieStore.getAll();
-        },
-        setAll(cookiesToSet: { name: string; value: string; options: CookieOptions }[]) {
-          try {
-            cookiesToSet.forEach(({ name, value, options }) =>
-              cookieStore.set(name, value, options),
-            );
-          } catch {
-            // Server Component — ignore
-          }
-        },
-      },
-    },
-  );
+export function createServiceClient(): SupabaseClient {
+  return createPgRestClient() as unknown as SupabaseClient;
 }
 
-export function createServiceClient() {
-  return createServerClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.SUPABASE_SERVICE_ROLE_KEY!,
-    {
-      cookies: { getAll: () => [], setAll: () => {} },
-      auth: { persistSession: false },
-    },
-  );
+export async function createClient(): Promise<SupabaseClient> {
+  return createPgRestClient() as unknown as SupabaseClient;
 }
