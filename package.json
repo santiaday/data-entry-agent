@@ -13,6 +13,7 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "migrate": "tsx scripts/migrate.ts",
+    "sync": "tsx scripts/sync-from-supabase.ts",
     "backfill": "tsx scripts/backfill.ts",
     "oauth:outreach": "tsx scripts/outreach-oauth.ts"
   },

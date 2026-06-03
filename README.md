@@ -64,6 +64,27 @@ pnpm install
 pnpm dev          # http://localhost:3000  (redirects to /data-entry)
 ```
 
+## Migrating data from an existing database
+
+If you already have this data in another Postgres database (e.g. a Supabase
+project), copy it all over in one shot — org credentials, prompts, field configs,
+batches, runs, and extractions:
+
+```bash
+# Run the destination migrations first (or just boot the app once).
+SOURCE_DATABASE_URL="postgresql://postgres:...@db.xxxx.supabase.co:5432/postgres" \
+DATABASE_URL="postgresql://...your-destination..." \
+pnpm sync
+```
+
+- Find `SOURCE_DATABASE_URL` in the Supabase dashboard: Project Settings →
+  Database → Connection string → **URI** (direct connection, port 5432).
+- By default the destination `de_*`/queue tables are **replaced** so IDs match the
+  source exactly; the `orgs` row is upserted. Pass `--no-replace` to upsert by id
+  without clearing existing rows.
+- Only columns present in both databases are copied, so schema differences are
+  handled gracefully.
+
 ## Backfill / CLI
 
 Process records from the command line (great for historical backfills):
