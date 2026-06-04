@@ -15,7 +15,7 @@ export default async function RunDetailPage({
   const [runRes, extractionsRes] = await Promise.all([
     supabase
       .from('de_runs')
-      .select('*, de_batches!inner(trigger_type, soql_query, dry_run)')
+      .select('*')
       .eq('id', id)
       .eq('org_id', DEFAULT_ORG_ID)
       .maybeSingle(),
@@ -36,6 +36,18 @@ export default async function RunDetailPage({
     );
   }
 
+  // Attach the parent batch (originally a PostgREST embedded resource — the
+  // local Postgres adapter doesn't support embeds, so fetch it separately).
+  const run = runRes.data as Record<string, unknown> & { batch_id?: string | null };
+  if (run.batch_id) {
+    const batchRes = await supabase
+      .from('de_batches')
+      .select('trigger_type, soql_query, dry_run')
+      .eq('id', run.batch_id)
+      .maybeSingle();
+    run.de_batches = batchRes.data ?? null;
+  }
+
   // Compute batch summary
   const extractions = extractionsRes.data ?? [];
   const batchSummary: Record<string, { total: number; written: number; skipped: number; errored: number }> = {};
@@ -53,7 +65,7 @@ export default async function RunDetailPage({
 
   return (
     <RunDetailView
-      run={runRes.data as never}
+      run={run as never}
       extractions={extractions as never[]}
       batchSummary={batchSummary}
     />

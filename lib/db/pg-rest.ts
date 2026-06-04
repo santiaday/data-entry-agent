@@ -368,14 +368,25 @@ class PgQuery implements PromiseLike<PostgrestResult> {
     return this.shapeRows(res.rows, count);
   }
 
-  /** Turn a "a, b, c" select list into quoted identifiers (ignores embeds — unused here). */
+  /**
+   * Turn a "a, b, c" select list into quoted identifiers. PostgREST embedded
+   * resources (e.g. `de_batches!inner(...)`) are not supported by this adapter,
+   * so any non-plain-column token is dropped rather than throwing — the base
+   * row is still returned. Callers needing the related row should fetch it
+   * separately. Falls back to `*` if nothing plain remains.
+   */
   private selectColumnList(): string {
-    return this.selectColumns
+    // An embedded resource (parentheses present, e.g. `de_batches!inner(...)`)
+    // can't be projected here — its inner column names aren't columns of the
+    // base table. Fall back to selecting all base columns; the related row is
+    // fetched separately by the caller.
+    if (this.selectColumns.includes('(')) return '*';
+    const cols = this.selectColumns
       .split(',')
       .map((c) => c.trim())
       .filter(Boolean)
-      .map((c) => (c === '*' ? '*' : ident(c)))
-      .join(', ');
+      .filter((c) => c === '*' || /^[a-zA-Z_][a-zA-Z0-9_]*$/.test(c));
+    return cols.length ? cols.map((c) => (c === '*' ? '*' : ident(c))).join(', ') : '*';
   }
 
   private async runInsert(): Promise<PostgrestResult> {

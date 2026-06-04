@@ -8,6 +8,7 @@ const PUBLIC_PATHS = [
   '/api/login',
   '/api/logout',
   '/api/health',
+  '/api/admin/import',
   '/api/data-entry/webhook',
   '/api/data-entry/process-queue',
 ];

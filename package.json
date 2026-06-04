@@ -14,6 +14,7 @@
     "test": "vitest run",
     "migrate": "tsx scripts/migrate.ts",
     "sync": "tsx scripts/sync-from-supabase.ts",
+    "export-data": "tsx scripts/export-data.ts",
     "backfill": "tsx scripts/backfill.ts",
     "oauth:outreach": "tsx scripts/outreach-oauth.ts"
   },
