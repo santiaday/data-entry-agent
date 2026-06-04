@@ -32,9 +32,12 @@ config({ path: path.join(process.cwd(), '.env.local') });
 config({ path: path.join(process.cwd(), '.env') });
 
 const REPLACE = !process.argv.includes('--no-replace');
+// --skip-orgs: do not copy the orgs row. Recommended when credentials live in
+// env vars — avoids writing the Salesforce private key into the destination DB.
+const SKIP_ORGS = process.argv.includes('--skip-orgs');
 
 // Copy order respects foreign keys (parents first).
-const TABLES = [
+const ALL_TABLES = [
   'orgs',
   'de_prompts',
   'de_field_configs',
@@ -43,6 +46,7 @@ const TABLES = [
   'de_extractions',
   'data_entry_queue',
 ] as const;
+const TABLES = ALL_TABLES.filter((t) => !(SKIP_ORGS && t === 'orgs'));
 
 // Truncate order is the reverse (children first). orgs is never truncated.
 const TRUNCATE_ORDER = [
@@ -91,7 +95,14 @@ function encode(value: unknown, dataType: string | undefined): unknown {
 }
 
 async function copyTable(src: pg.Client, dst: pg.Client, table: string): Promise<number> {
-  const srcRows = (await src.query(`SELECT * FROM ${ident(table)}`)).rows as Record<string, unknown>[];
+  let srcRows: Record<string, unknown>[];
+  try {
+    srcRows = (await src.query(`SELECT * FROM ${ident(table)}`)).rows as Record<string, unknown>[];
+  } catch (err) {
+    // e.g. the table doesn't exist in the source schema — skip it.
+    console.log(`  ${table}: not present in source — skipped (${err instanceof Error ? err.message : err})`);
+    return 0;
+  }
   if (srcRows.length === 0) {
     console.log(`  ${table}: 0 rows in source — skipped`);
     return 0;
@@ -138,7 +149,7 @@ async function main() {
   await dst.connect();
 
   try {
-    console.log(`Sync mode: ${REPLACE ? 'REPLACE (truncate destination de_*/queue first)' : 'UPSERT by id'}`);
+    console.log(`Sync mode: ${REPLACE ? 'REPLACE (truncate destination de_*/queue first)' : 'UPSERT by id'}${SKIP_ORGS ? ' · skipping orgs (credentials stay in env)' : ''}`);
 
     if (REPLACE) {
       const list = TRUNCATE_ORDER.map(ident).join(', ');

@@ -89,6 +89,9 @@ pnpm sync
 - By default the destination `de_*`/queue tables are **replaced** so IDs match the
   source exactly; the `orgs` row is upserted. Pass `--no-replace` to upsert by id
   without clearing existing rows.
+- Pass `--skip-orgs` to copy only the data tables and leave the `orgs` row alone —
+  recommended when your credentials live in env vars, so the Salesforce private key
+  is never written into the destination database.
 - Only columns present in both databases are copied, so schema differences are
   handled gracefully.
 
