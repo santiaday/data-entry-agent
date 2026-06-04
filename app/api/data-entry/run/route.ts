@@ -21,6 +21,7 @@ const requestSchema = z.object({
   objectType: z.enum(['Lead', 'Opportunity']),
   dryRun: z.boolean().optional().default(false),
   fieldBatches: z.array(z.string()).optional(),
+  fieldNames: z.array(z.string()).optional(),
 });
 
 export async function POST(request: Request) {
@@ -43,7 +44,7 @@ export async function POST(request: Request) {
     return jsonError(`Invalid request: ${parsed.error.message}`, 400);
   }
 
-  const { recordId, objectType, dryRun, fieldBatches } = parsed.data;
+  const { recordId, objectType, dryRun, fieldBatches, fieldNames } = parsed.data;
   const supabase = createServiceClient();
 
   const encoder = new TextEncoder();
@@ -64,6 +65,7 @@ export async function POST(request: Request) {
             userId: ctx.userId,
             dryRun,
             fieldBatches,
+            fieldNames,
           },
           supabase,
           tokenCache,

@@ -3,6 +3,7 @@
 import { useEffect, useState, useCallback } from 'react';
 import Link from 'next/link';
 import { StatusBadge, DryRunBadge } from './StatusBadge';
+import { BatchFieldSelector } from './BatchFieldSelector';
 import type { BatchListItem, QueueItem, HistoryRow, StreamEvent } from './types';
 
 export default function DataEntryDashboard() {
@@ -20,6 +21,9 @@ export default function DataEntryDashboard() {
   const [batchObjectType, setBatchObjectType] = useState<'Lead' | 'Opportunity'>('Lead');
   const [batchRunning, setBatchRunning] = useState(false);
   const [batchError, setBatchError] = useState<string | null>(null);
+  // Field scope: all fields, or a specific subset (by SF field API name).
+  const [batchScopeAll, setBatchScopeAll] = useState(true);
+  const [batchSelectedFields, setBatchSelectedFields] = useState<string[]>([]);
 
   // ── History ───────────────────────────────────────────
   const [batches, setBatches] = useState<BatchListItem[]>([]);
@@ -215,11 +219,18 @@ export default function DataEntryDashboard() {
     setBatchRunning(true);
     setBatchError(null);
 
+    const fieldNames = batchScopeAll ? undefined : batchSelectedFields;
+
     try {
       const response = await fetch('/api/data-entry/batch', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ soqlQuery: soqlQuery.trim(), objectType: batchObjectType, dryRun: batchDryRun }),
+        body: JSON.stringify({
+          soqlQuery: soqlQuery.trim(),
+          objectType: batchObjectType,
+          dryRun: batchDryRun,
+          ...(fieldNames && fieldNames.length > 0 ? { fieldNames } : {}),
+        }),
       });
 
       const data = await response.json();
@@ -294,7 +305,7 @@ export default function DataEntryDashboard() {
       {/* ── Batch Run ─────────────────────────────────── */}
       <section className="rounded-xl border bg-card p-6">
         <h2 className="text-lg font-semibold">Batch Run</h2>
-        <p className="mt-1 text-sm text-muted-foreground">Run against multiple records via SOQL query (max 5 via web)</p>
+        <p className="mt-1 text-sm text-muted-foreground">Run against multiple records via SOQL query. Scope to specific fields to cut cost on targeted backfills.</p>
 
         <div className="mt-4 space-y-3">
           <div>
@@ -313,7 +324,11 @@ export default function DataEntryDashboard() {
               <label className="block text-xs font-medium text-muted-foreground mb-1">Object</label>
               <select
                 value={batchObjectType}
-                onChange={(e) => setBatchObjectType(e.target.value as 'Lead' | 'Opportunity')}
+                onChange={(e) => {
+                  setBatchObjectType(e.target.value as 'Lead' | 'Opportunity');
+                  // Field names differ per object — reset the subset selection.
+                  setBatchSelectedFields([]);
+                }}
                 className="rounded-md border bg-background px-3 py-2 text-sm"
                 disabled={batchRunning}
               >
@@ -325,14 +340,33 @@ export default function DataEntryDashboard() {
               <label className="block text-xs font-medium text-muted-foreground mb-1">Mode</label>
               <ModeToggle active={batchDryRun} onChange={setBatchDryRun} disabled={batchRunning} />
             </div>
+          </div>
+
+          <BatchFieldSelector
+            objectType={batchObjectType}
+            disabled={batchRunning}
+            scopeAll={batchScopeAll}
+            selectedFields={batchSelectedFields}
+            onScopeAllChange={setBatchScopeAll}
+            onSelectedFieldsChange={setBatchSelectedFields}
+          />
+
+          <div className="flex items-center gap-3">
             <button
               onClick={handleBatchRun}
-              disabled={batchRunning || !soqlQuery.trim()}
+              disabled={batchRunning || !soqlQuery.trim() || (!batchScopeAll && batchSelectedFields.length === 0)}
               type="button"
               className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-700 disabled:opacity-50 transition"
             >
               {batchRunning ? 'Starting...' : 'Start Batch'}
             </button>
+            {!batchScopeAll && (
+              <span className="text-xs text-muted-foreground">
+                {batchSelectedFields.length === 0
+                  ? 'Select at least one field'
+                  : `${batchSelectedFields.length} field${batchSelectedFields.length === 1 ? '' : 's'} will be processed`}
+              </span>
+            )}
           </div>
         </div>
 

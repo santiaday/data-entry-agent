@@ -7,7 +7,9 @@ every run, extraction, and confidence score.
 
 It ships with a web console to:
 
-- **Run** a single record or a **batch/backfill** over a SOQL query
+- **Run** a single record or a **batch/backfill** over a SOQL query — optionally
+  scoped to **specific fields only** (cheaper targeted backfills after editing a
+  field or prompt)
 - **Edit prompts** — the extraction system prompt is versioned and editable in the UI
 - **Edit fields** — configure which fields are extracted, their types, options
   (picklists), instructions, and write mode (overwrite / fill-if-empty)
@@ -106,6 +108,11 @@ pnpm backfill -- --record-id 00Q... --object-type Lead --dry-run
 # Backfill every matching record, 3 at a time
 pnpm backfill -- --backfill-query "SELECT Id FROM Opportunity WHERE StageName = 'Proposal'" \
   --object-type Opportunity --concurrency 3
+
+# Scope a backfill to specific fields only (much cheaper — useful after editing
+# one field/prompt and propagating it to many records)
+pnpm backfill -- --backfill-query "SELECT Id FROM Opportunity WHERE StageName = 'Proposal'" \
+  --object-type Opportunity --fields AI_Buyer_Persona__c,AI_Use_Case__c
 
 # Resume an interrupted backfill (skips already-completed records)
 pnpm backfill -- --backfill-query "..." --object-type Opportunity --skip-completed

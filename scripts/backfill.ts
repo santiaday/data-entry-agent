@@ -34,6 +34,7 @@ async function main(): Promise<void> {
       tokenCache,
       concurrency: args.concurrency,
       skipCompleted: args.skipCompleted,
+      fields: args.fields,
     });
   } else if (args.recordId) {
     await runSingle({
@@ -41,6 +42,7 @@ async function main(): Promise<void> {
       objectType: args.objectType,
       dryRun: args.dryRun,
       tokenCache,
+      fields: args.fields,
     });
   } else {
     console.error('Error: --record-id or --backfill-query is required');
@@ -56,6 +58,7 @@ async function runSingle(params: {
   objectType: 'Lead' | 'Opportunity';
   dryRun: boolean;
   tokenCache: SalesforceTokenCache;
+  fields: string[];
 }): Promise<void> {
   console.log(`\n[data-entry] Processing ${params.objectType} ${params.recordId}${params.dryRun ? ' (DRY RUN)' : ''}\n`);
 
@@ -71,6 +74,7 @@ async function runSingle(params: {
       orgId: ORG_ID,
       userId: null,
       dryRun: params.dryRun,
+      fieldNames: params.fields.length ? params.fields : undefined,
     },
     supabase,
     tokenCache: params.tokenCache,
@@ -110,6 +114,7 @@ async function runBackfill(params: {
   tokenCache: SalesforceTokenCache;
   concurrency: number;
   skipCompleted: boolean;
+  fields: string[];
 }): Promise<void> {
   const startedAt = Date.now();
 
@@ -120,6 +125,11 @@ async function runBackfill(params: {
   console.log(`  Query:       ${params.query}`);
   console.log(`  Object:      ${params.objectType}`);
   console.log(`  Concurrency: ${params.concurrency}`);
+  if (params.fields.length > 0) {
+    console.log(`  Fields:      ${params.fields.length} specific (${params.fields.join(', ')})`);
+  } else {
+    console.log(`  Fields:      all`);
+  }
   if (params.skipCompleted) {
     console.log(`  Skip done:   yes (resume mode — filters de_runs.status = 'completed')`);
   }
@@ -196,6 +206,7 @@ async function runBackfill(params: {
             orgId: ORG_ID,
             userId: null,
             dryRun: params.dryRun,
+            fieldNames: params.fields.length ? params.fields : undefined,
           },
           supabase,
           tokenCache: params.tokenCache,
@@ -389,6 +400,7 @@ type CliArgs = {
   backfillQuery: string | null;
   concurrency: number;
   skipCompleted: boolean;
+  fields: string[];
   help: boolean;
 };
 
@@ -400,6 +412,7 @@ function parseArgs(argv: string[]): CliArgs {
     backfillQuery: null,
     concurrency: 2,
     skipCompleted: false,
+    fields: [],
     help: false,
   };
 
@@ -423,6 +436,12 @@ function parseArgs(argv: string[]): CliArgs {
       case '--skip-completed':
         args.skipCompleted = true;
         break;
+      case '--fields':
+        args.fields = (argv[++i] ?? '')
+          .split(',')
+          .map((s) => s.trim())
+          .filter(Boolean);
+        break;
       case '--help':
       case '-h':
         args.help = true;
@@ -443,6 +462,8 @@ Options:
   --dry-run                 Log extractions without writing to Salesforce
   --backfill-query <soql>   SOQL query to find records for batch processing
   --concurrency <n>         Max concurrent records in backfill (default: 2)
+  --fields <a,b,c>          Only extract/write these SF field API names (comma-separated).
+                            Omit to process all fields. Scoping to a few fields cuts cost.
   --skip-completed          Skip records already processed (status='completed' in de_runs
                             with matching object_type + dry_run). Use to resume an
                             interrupted backfill — just re-run the same command.

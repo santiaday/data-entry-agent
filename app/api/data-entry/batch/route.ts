@@ -46,6 +46,7 @@ const requestSchema = z.object({
   objectType: z.enum(['Lead', 'Opportunity']),
   dryRun: z.boolean().optional().default(false),
   fieldBatches: z.array(z.string()).optional(),
+  fieldNames: z.array(z.string()).optional(),
 });
 
 export async function POST(request: Request) {
@@ -70,7 +71,7 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: parsed.error.message, code: 'INVALID_REQUEST' }, { status: 400 });
   }
 
-  const { soqlQuery, objectType, dryRun, fieldBatches } = parsed.data;
+  const { soqlQuery, objectType, dryRun, fieldBatches, fieldNames } = parsed.data;
   const orgId = ctx.orgId;
   const userBatchCap =
     typeof dePerms.max_batch_size === 'number' ? dePerms.max_batch_size : MAX_WEB_BATCH_SIZE;
@@ -143,6 +144,7 @@ export async function POST(request: Request) {
       objectType,
       dryRun,
       fieldBatches,
+      fieldNames,
       supabase,
       orgId,
       userId: ctx.userId,
@@ -174,11 +176,12 @@ async function processRecords(params: {
   objectType: 'Lead' | 'Opportunity';
   dryRun: boolean;
   fieldBatches?: string[];
+  fieldNames?: string[];
   supabase: ReturnType<typeof createServiceClient>;
   orgId: string;
   userId: string | null;
 }): Promise<void> {
-  const { batchId, recordIds, objectType, dryRun, fieldBatches, supabase, orgId, userId } = params;
+  const { batchId, recordIds, objectType, dryRun, fieldBatches, fieldNames, supabase, orgId, userId } = params;
   let completed = 0;
   let failed = 0;
 
@@ -192,6 +195,7 @@ async function processRecords(params: {
           userId,
           dryRun,
           fieldBatches,
+          fieldNames,
         },
         supabase,
         tokenCache,

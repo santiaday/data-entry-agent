@@ -14,6 +14,13 @@ export type RunInput = {
   readonly dryRun: boolean;
   /** Optional: only run specific batches (null = all 14). */
   readonly fieldBatches?: readonly string[];
+  /**
+   * Optional: only extract/write these specific fields, by Salesforce API name
+   * (e.g. ['AI_Buyer_Persona__c']). Undefined or empty = all fields for the
+   * object. Scoping to a few fields cuts cost: fewer fields → fewer LLM chunks,
+   * so the large context isn't re-sent as many times.
+   */
+  readonly fieldNames?: readonly string[];
 };
 
 /** Input to run the pipeline for a batch of records. */
@@ -24,6 +31,7 @@ export type BatchInput = {
   readonly userId: string | null;
   readonly dryRun: boolean;
   readonly fieldBatches?: readonly string[];
+  readonly fieldNames?: readonly string[];
   readonly maxRecords?: number;
 };
 

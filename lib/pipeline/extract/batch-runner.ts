@@ -51,6 +51,8 @@ export type BatchRunnerParams = {
   readonly systemPrompt?: string;
   /** Optional: only run fields in specific batches (null = all). */
   readonly filterBatches?: readonly string[];
+  /** Optional: only run these specific fields by SF API name (null = all). */
+  readonly filterFields?: readonly string[];
   /** Max fields per OpenAI call. Default: 80. */
   readonly chunkSize?: number;
   /** Concurrency limit when chunking is needed. Default: 4. */
@@ -86,16 +88,12 @@ export async function runExtractionBatches(
     fieldConfigs,
     systemPrompt = EXTRACTION_SYSTEM_PROMPT,
     filterBatches,
+    filterFields,
     chunkSize = DEFAULT_CHUNK_SIZE,
     concurrency = DEFAULT_CHUNK_CONCURRENCY,
   } = params;
 
-  // Filter fields: must match objectType + optional batch filter
-  const applicableFields = fieldConfigs.filter((f) => {
-    if (f.sfObject !== objectType) return false;
-    if (filterBatches && filterBatches.length > 0 && !filterBatches.includes(f.batchId)) return false;
-    return true;
-  });
+  const applicableFields = selectApplicableFields(fieldConfigs, objectType, filterBatches, filterFields);
 
   if (applicableFields.length === 0) {
     return {
@@ -216,6 +214,28 @@ async function runSingleCall(
 }
 
 // ── Helpers ─────────────────────────────────────────────────
+
+/**
+ * Select which field configs a run will process: must match the object type,
+ * fall within any requested batch groups, and (if a field allowlist is given)
+ * be one of those fields by Salesforce API name. An empty or omitted filter
+ * means "no restriction" for that dimension.
+ */
+export function selectApplicableFields(
+  fieldConfigs: readonly FieldConfig[],
+  objectType: 'Lead' | 'Opportunity',
+  filterBatches?: readonly string[],
+  filterFields?: readonly string[],
+): FieldConfig[] {
+  const batchSet = filterBatches && filterBatches.length > 0 ? new Set(filterBatches) : null;
+  const fieldSet = filterFields && filterFields.length > 0 ? new Set(filterFields) : null;
+  return fieldConfigs.filter((f) => {
+    if (f.sfObject !== objectType) return false;
+    if (batchSet && !batchSet.has(f.batchId)) return false;
+    if (fieldSet && !fieldSet.has(f.fieldName)) return false;
+    return true;
+  });
+}
 
 function chunkArray<T>(items: readonly T[], size: number): T[][] {
   if (size <= 0 || items.length === 0) return [items.slice()] as T[][];

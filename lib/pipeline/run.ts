@@ -61,7 +61,7 @@ export type RunPipelineParams = {
  */
 export async function runPipeline(params: RunPipelineParams): Promise<RunResult> {
   const { input, supabase, tokenCache, onEvent, existingBatchId, triggerType } = params;
-  const { recordId, objectType, orgId, userId, dryRun, fieldBatches } = input;
+  const { recordId, objectType, orgId, userId, dryRun, fieldBatches, fieldNames } = input;
   const startTime = Date.now();
   const emit = onEvent ?? (() => {});
 
@@ -197,6 +197,7 @@ export async function runPipeline(params: RunPipelineParams): Promise<RunResult>
         fieldConfigs,
         systemPrompt,
         filterBatches: fieldBatches ? [...fieldBatches] : undefined,
+        filterFields: fieldNames ? [...fieldNames] : undefined,
       }),
     );
 
