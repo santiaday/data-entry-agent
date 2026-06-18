@@ -68,7 +68,10 @@ async function getColumnTypes(
   for (const row of res.rows as { column_name: string; data_type: string; udt_name: string }[]) {
     map.set(row.column_name, { dataType: row.data_type, udtName: row.udt_name });
   }
-  typeCache.set(table, map);
+  // Don't cache an EMPTY result — a transient introspection failure would
+  // otherwise poison the cache forever and silently mis-encode jsonb/array
+  // writes. Re-introspect next call instead.
+  if (map.size > 0) typeCache.set(table, map);
   return map;
 }
 
@@ -303,8 +306,10 @@ class PgQuery implements PromiseLike<PostgrestResult> {
       });
       sql += ` ORDER BY ${parts.join(', ')}`;
     }
-    if (this.limitN !== null) sql += ` LIMIT ${Number(this.limitN)}`;
-    if (this.offsetN !== null) sql += ` OFFSET ${Number(this.offsetN)}`;
+    // Guard against non-finite values (e.g. a bad `limit` query param) that
+    // would otherwise emit literal `LIMIT NaN` and 500. Drop the clause instead.
+    if (this.limitN !== null && Number.isFinite(this.limitN)) sql += ` LIMIT ${Math.max(0, Math.trunc(this.limitN))}`;
+    if (this.offsetN !== null && Number.isFinite(this.offsetN)) sql += ` OFFSET ${Math.max(0, Math.trunc(this.offsetN))}`;
     return sql;
   }
 

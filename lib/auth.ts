@@ -19,6 +19,7 @@
  * The resolved email flows into config/queue writes as the actor for audit.
  */
 
+import { timingSafeEqual } from 'node:crypto';
 import { headers } from 'next/headers';
 import { DEFAULT_ORG_ID } from '@/lib/constants';
 import { EMPTY_PERMISSIONS, FULL_PERMISSIONS, type Permissions } from '@/lib/permissions';
@@ -59,43 +60,72 @@ function editorEmails(): Set<string> {
   );
 }
 
+// Safe default is READ-ONLY. Editor-for-everyone is an explicit single-tenant
+// opt-in (small leadership team behind the shared-password / ingress gate).
 function defaultRole(): 'editor' | 'viewer' {
-  return process.env.REVOPS_DEFAULT_ROLE === 'viewer' ? 'viewer' : 'editor';
+  return process.env.REVOPS_DEFAULT_ROLE === 'editor' ? 'editor' : 'viewer';
 }
 
-async function resolveEmail(): Promise<string | null> {
+function constantTimeEq(a: string, b: string): boolean {
+  const ab = Buffer.from(a);
+  const bb = Buffer.from(b);
+  if (ab.length !== bb.length) return false;
+  return timingSafeEqual(ab, bb);
+}
+
+/**
+ * Is the inbound identity header trustworthy? A bare forwarded header is
+ * client-forgeable, so we only trust it when provenance is established:
+ *   - REVOPS_INGRESS_SECRET set → require a matching x-ingress-secret header
+ *     (the ingress adds it; clients can't), OR
+ *   - REVOPS_IDENTITY_TRUSTED=true → explicit operator assertion that the
+ *     ingress strips client-supplied identity headers and sets its own.
+ * Otherwise identity is NOT trusted for role decisions.
+ */
+function identityTrusted(h: Headers): boolean {
+  const secret = process.env.REVOPS_INGRESS_SECRET;
+  if (secret) {
+    const headerName = process.env.REVOPS_INGRESS_SECRET_HEADER ?? 'x-ingress-secret';
+    const got = h.get(headerName) ?? '';
+    return got.length > 0 && constantTimeEq(got, secret);
+  }
+  return process.env.REVOPS_IDENTITY_TRUSTED === 'true';
+}
+
+async function resolveEmail(): Promise<{ email: string | null; trusted: boolean }> {
   try {
     const h = await headers();
     const custom = process.env.REVOPS_USER_HEADER;
-    const candidates = [
-      custom,
-      'x-deploybay-user',
-      'x-forwarded-email',
-      'x-auth-request-email',
-      'x-user-email',
-    ].filter(Boolean) as string[];
+    const candidates = [custom, 'x-deploybay-user', 'x-forwarded-email', 'x-auth-request-email', 'x-user-email']
+      .filter(Boolean) as string[];
+    let email: string | null = null;
     for (const name of candidates) {
       const v = h.get(name);
-      if (v && v.includes('@')) return v.trim().toLowerCase();
+      if (v && v.includes('@')) { email = v.trim().toLowerCase(); break; }
     }
+    return { email, trusted: identityTrusted(h) };
   } catch {
-    // headers() unavailable outside a request scope — fall through to anon.
+    // headers() unavailable outside a request scope.
+    return { email: null, trusted: false };
   }
-  return null;
 }
 
 export async function getAuthContext(): Promise<AuthContext> {
-  const email = await resolveEmail();
+  const { email, trusted } = await resolveEmail();
+  // A forged (untrusted) identity header is used for NOTHING privilege-bearing —
+  // it neither attributes nor grants. Only a trusted identity participates in
+  // role resolution; everyone else falls to the (read-only-by-default) role.
+  const trustedEmail = trusted ? email : null;
   const editors = editorEmails();
   let role: 'editor' | 'viewer';
-  if (email && editors.size > 0) {
-    role = editors.has(email) ? 'editor' : 'viewer';
+  if (trustedEmail && editors.size > 0) {
+    role = editors.has(trustedEmail) ? 'editor' : 'viewer';
   } else {
     role = defaultRole();
   }
   return {
-    userId: email,
-    email,
+    userId: trustedEmail,
+    email: trustedEmail,
     orgId: DEFAULT_ORG_ID,
     role,
     permissions: role === 'editor' ? EDITOR_PERMISSIONS : VIEWER_PERMISSIONS,

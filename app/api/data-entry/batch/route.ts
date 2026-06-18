@@ -33,9 +33,12 @@ const requestSchema = z.object({
   fieldGroups: z.array(z.string()).optional(),
 });
 
+const HARD_CAP = 1000; // absolute upper bound on a single enqueue request
+
 export async function POST(request: Request) {
+  // Gate on capability, NOT identity presence: in single-tenant mode there is
+  // no per-user email but an editor (explicit opt-in) may still run batches.
   const ctx = await getAuthContext();
-  if (!ctx.email) return jsonError('Unauthorized', 401, 'UNAUTHORIZED');
   const dePerms = ctx.permissions.modules.data_entry;
   if (!dePerms.access) return jsonError('Forbidden', 403, 'FORBIDDEN');
   if (!dePerms.can_run_batches) return jsonError('Forbidden', 403, 'FORBIDDEN');
@@ -69,6 +72,12 @@ export async function POST(request: Request) {
   if (recordIds.length === 0) {
     return jsonError('No valid record ids (expected 15–18 alphanumeric)', 400, 'NO_RECORDS');
   }
+  if (recordIds.length > HARD_CAP) {
+    return jsonError(`Batch exceeds the ${HARD_CAP}-record cap; split it`, 400, 'BATCH_TOO_LARGE');
+  }
+  if (dePerms.max_batch_size != null && recordIds.length > dePerms.max_batch_size) {
+    return jsonError(`Batch exceeds your limit of ${dePerms.max_batch_size}`, 403, 'BATCH_LIMIT_EXCEEDED');
+  }
 
   const supabase = createServiceClient();
 
@@ -83,7 +92,7 @@ export async function POST(request: Request) {
       ...(fieldGroups ? { field_groups: fieldGroups } : {}),
     },
     dry_run: dryRun,
-    enqueued_by: ctx.email,
+    enqueued_by: ctx.email ?? 'ui',
   }));
 
   const { error } = await supabase

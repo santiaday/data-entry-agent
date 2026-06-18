@@ -1,5 +1,5 @@
 import { createServiceClient } from '@/lib/supabase/server';
-import { mapRun, mapExtraction, extractionCounts } from '@/lib/revops/mappers';
+import { AGENT_REF, mapRun, mapExtraction, extractionCounts } from '@/lib/revops/mappers';
 import RunDetailView from '@/components/data-entry/RunDetailView';
 
 export const dynamic = 'force-dynamic';
@@ -13,11 +13,12 @@ export default async function RunDetailPage({
   const supabase = createServiceClient();
 
   const [runRes, extractionsRes] = await Promise.all([
-    supabase.from('runs.agent_runs').select('*').eq('run_id', id).maybeSingle(),
+    supabase.from('runs.agent_runs').select('*').eq('run_id', id).eq('agent_ref', AGENT_REF).maybeSingle(),
     supabase
       .from('runs.field_extractions')
       .select('*')
       .eq('run_id', id)
+      .eq('agent_ref', AGENT_REF)
       .order('group_key', { ascending: true })
       .order('field_api_name', { ascending: true }),
   ]);

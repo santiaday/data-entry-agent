@@ -57,7 +57,7 @@ export async function POST(request: Request) {
         field_groups: fieldGroups ?? null,
       },
       dry_run: dryRun,
-      enqueued_by: ctx.email,
+      enqueued_by: ctx.email ?? 'ui',
     })
     .select('id')
     .single();

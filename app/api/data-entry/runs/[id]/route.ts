@@ -10,7 +10,7 @@
 import { NextResponse } from 'next/server';
 import { createServiceClient } from '@/lib/supabase/server';
 import { getAuthContext } from '@/lib/auth';
-import { jsonError, mapRun, mapExtraction, extractionCounts } from '@/lib/revops/mappers';
+import { AGENT_REF, jsonError, mapRun, mapExtraction, extractionCounts } from '@/lib/revops/mappers';
 
 export const runtime = 'nodejs';
 
@@ -33,11 +33,13 @@ export async function GET(
       .from('runs.agent_runs')
       .select('*')
       .eq('run_id', id)
+      .eq('agent_ref', AGENT_REF) // scope: never disclose another agent's run by id
       .maybeSingle(),
     supabase
       .from('runs.field_extractions')
       .select('*')
       .eq('run_id', id)
+      .eq('agent_ref', AGENT_REF)
       .order('created_at', { ascending: true }),
   ]);
 

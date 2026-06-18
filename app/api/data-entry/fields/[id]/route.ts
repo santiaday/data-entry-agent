@@ -90,7 +90,7 @@ export async function PUT(
     .from('config.field_definitions')
     .update(update)
     .eq('agent_ref', AGENT_REF)
-    .eq('field_key', id)
+    .eq('id', id)
     .select()
     .single();
 
@@ -126,7 +126,7 @@ export async function DELETE(
       updated_at: new Date().toISOString(),
     })
     .eq('agent_ref', AGENT_REF)
-    .eq('field_key', id);
+    .eq('id', id);
 
   if (error) {
     return jsonError(error.message, 500, 'DELETE_FAILED');

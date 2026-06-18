@@ -27,7 +27,6 @@ const SLOT_COLUMNS = 'id, slot, version, body, is_active, notes, created_at';
 
 export async function GET() {
   const ctx = await getAuthContext();
-  if (!ctx.email) return jsonError('Unauthorized', 401, 'UNAUTHORIZED');
   if (!ctx.permissions.modules.data_entry.access) {
     return jsonError('Forbidden', 403, 'FORBIDDEN');
   }
@@ -65,8 +64,8 @@ const createSchema = z.object({
 });
 
 export async function POST(request: Request) {
+  // Gate on capability, not identity presence (single-tenant editor has no email).
   const ctx = await getAuthContext();
-  if (!ctx.email) return jsonError('Unauthorized', 401, 'UNAUTHORIZED');
   if (!ctx.permissions.modules.data_entry.can_edit_prompts) {
     return jsonError('Forbidden', 403, 'FORBIDDEN');
   }
@@ -109,7 +108,12 @@ export async function POST(request: Request) {
 
   const nextVersion = ((maxRow?.version as number | undefined) ?? 0) + 1;
 
-  // Deactivate currently-active rows for BOTH slots.
+  // Deactivate currently-active rows for BOTH slots, then insert the new active
+  // pair. The partial-unique "one active per (agent_ref, slot)" index requires
+  // deactivate-before-insert (a single statement can't flip + insert without a
+  // transient duplicate). The only failure window — a crash between the two —
+  // leaves zero active rows, which DEGRADES SAFELY: the runtime falls back to
+  // the agent.md prompt body, and re-saving from the UI restores an active row.
   const { error: deactErr } = await supabase
     .from('config.prompt_versions')
     .update({ is_active: false })
@@ -131,7 +135,7 @@ export async function POST(request: Request) {
         body: systemPrompt,
         is_active: true,
         notes,
-        created_by: ctx.email,
+        created_by: ctx.email ?? 'ui',
       },
       {
         agent_ref: AGENT_REF,
@@ -140,7 +144,7 @@ export async function POST(request: Request) {
         body: userPromptPreamble,
         is_active: true,
         notes,
-        created_by: ctx.email,
+        created_by: ctx.email ?? 'ui',
       },
     ])
     .select(SLOT_COLUMNS);
