@@ -1,224 +1,99 @@
 /**
- * POST /api/data-entry/batch — Start a batch of records via SOQL query.
+ * POST /api/data-entry/batch — Thin bulk-enqueue of records.
  *
- * Returns 202 with batchId immediately.
- * Records are processed in the background (up to 5 per web invocation).
- * Larger batches should use the CLI.
+ * The UI can no longer reach Salesforce, so it does NOT resolve SOQL cohorts or
+ * execute extraction. This route simply enqueues one runs.dispatch_queue row per
+ * record id (same shape as the single-record run route); the revops-agents
+ * cron-driver drains the queue and runs the pipeline.
+ *
+ * SOQL-cohort resolution is a backend/local-tool concern now. If the client still
+ * sends a `soql`/`soqlQuery`, we reject with a clear message.
+ *
+ * Requires can_run_batches.
  */
 
-import { NextResponse } from 'next/server';
-import { getAuthContext } from '@/lib/auth';
 import { z } from 'zod';
-import { SalesforceTokenCache, executeSoql, validateSoql, clampSoqlLimit } from '@/lib/sf';
-import {
-  runPipeline,
-  createBatch,
-  completeBatch,
-  createRun,
-} from '@/lib/pipeline';
+import { getAuthContext } from '@/lib/auth';
 import { createServiceClient } from '@/lib/supabase/server';
+import { AGENT_REF, jsonError } from '@/lib/revops/mappers';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
-export const maxDuration = 300;
 
-const tokenCache = new SalesforceTokenCache();
-
-/**
- * Cap on records per web-triggered batch.
- *
- * Local dev (next dev): no enforced timeout, so this cap is set high enough
- * that practical use isn't blocked. Each record takes ~30-60s, so 100 records
- * could take an hour — but the user's browser session can stay open and
- * periodic polling shows progress.
- *
- * IF/WHEN HOSTING ON VERCEL: serverless functions cap at 300s (Pro tier).
- * For batches that take longer than that, you'll need to switch to one of:
- *   1. The CLI: `pnpm data-entry -- --backfill-query "..."` — no timeout
- *   2. A queue + worker (Inngest, QStash, Trigger.dev) for true background jobs
- *   3. Client-side fan-out: UI loops over IDs and calls /api/data-entry/run for each
- * Lower this cap to ~5 if you go to production without #2 or #3.
- */
-const MAX_WEB_BATCH_SIZE = 1000;
+// Salesforce IDs are 15 or 18 chars, alphanumeric.
+const SF_ID = /^[A-Za-z0-9]{15,18}$/;
 
 const requestSchema = z.object({
-  soqlQuery: z.string().min(10).max(5000),
+  recordIds: z
+    .array(z.string())
+    .min(1)
+    .transform((ids) => ids.filter((id) => SF_ID.test(id))),
   objectType: z.enum(['Lead', 'Opportunity']),
-  dryRun: z.boolean().optional().default(false),
-  fieldBatches: z.array(z.string()).optional(),
-  fieldNames: z.array(z.string()).optional(),
+  dryRun: z.boolean().optional().default(true),
+  fieldGroups: z.array(z.string()).optional(),
 });
 
 export async function POST(request: Request) {
   const ctx = await getAuthContext();
-  if (!ctx) {
-    return NextResponse.json({ error: 'Unauthorized', code: 'UNAUTHORIZED' }, { status: 401 });
-  }
+  if (!ctx.email) return jsonError('Unauthorized', 401, 'UNAUTHORIZED');
   const dePerms = ctx.permissions.modules.data_entry;
-  if (!dePerms.access || !dePerms.can_run_batches) {
-    return NextResponse.json({ error: 'Forbidden', code: 'FORBIDDEN' }, { status: 403 });
-  }
+  if (!dePerms.access) return jsonError('Forbidden', 403, 'FORBIDDEN');
+  if (!dePerms.can_run_batches) return jsonError('Forbidden', 403, 'FORBIDDEN');
 
   let body: unknown;
   try {
     body = await request.json();
   } catch {
-    return NextResponse.json({ error: 'Invalid JSON body', code: 'INVALID_REQUEST' }, { status: 400 });
+    return jsonError('Invalid JSON body', 400, 'INVALID_REQUEST');
+  }
+
+  // SOQL-cohort batches are resolved by the backend/local tool now.
+  if (body && typeof body === 'object') {
+    const b = body as Record<string, unknown>;
+    if (b.soql != null || b.soqlQuery != null) {
+      return jsonError(
+        'SOQL cohort batches are resolved by the backend/local tool now; pass recordIds[] instead',
+        400,
+        'INVALID_REQUEST',
+      );
+    }
   }
 
   const parsed = requestSchema.safeParse(body);
   if (!parsed.success) {
-    return NextResponse.json({ error: parsed.error.message, code: 'INVALID_REQUEST' }, { status: 400 });
+    return jsonError(`Invalid request: ${parsed.error.message}`, 400, 'INVALID_REQUEST');
   }
 
-  const { soqlQuery, objectType, dryRun, fieldBatches, fieldNames } = parsed.data;
-  const orgId = ctx.orgId;
-  const userBatchCap =
-    typeof dePerms.max_batch_size === 'number' ? dePerms.max_batch_size : MAX_WEB_BATCH_SIZE;
+  const { recordIds, objectType, dryRun, fieldGroups } = parsed.data;
+
+  if (recordIds.length === 0) {
+    return jsonError('No valid record ids (expected 15–18 alphanumeric)', 400, 'NO_RECORDS');
+  }
+
   const supabase = createServiceClient();
 
-  // Validate + sanitize the SOQL (strips PII, injects Test_Account__c filter, rejects DML/CASE WHEN).
-  const validation = validateSoql(soqlQuery, []);
-  if (!validation.ok) {
-    return NextResponse.json(
-      { error: `Invalid SOQL: ${validation.errors.join(', ')}`, code: 'INVALID_SOQL' },
-      { status: 400 },
-    );
+  const rows = recordIds.map((recordId) => ({
+    agent_ref: AGENT_REF,
+    subject_id: recordId,
+    subject_kind: objectType,
+    payload: {
+      record_id: recordId,
+      record_type: objectType,
+      dry_run: dryRun,
+      ...(fieldGroups ? { field_groups: fieldGroups } : {}),
+    },
+    dry_run: dryRun,
+    enqueued_by: ctx.email,
+  }));
+
+  const { error } = await supabase
+    .from('runs.dispatch_queue')
+    .insert(rows)
+    .select('id');
+
+  if (error) {
+    return jsonError(error.message, 500, 'ENQUEUE_FAILED');
   }
 
-  // Enforce the user's batch-size cap at the SOQL level so Salesforce never
-  // returns more records than the user is permitted to process. If the query
-  // already specifies a smaller LIMIT we keep it.
-  const cappedQuery = clampSoqlLimit(validation.sanitizedQuery, userBatchCap);
-
-  try {
-    // Execute the sanitized + capped query to get record IDs
-    const queryResult = await executeSoql({
-      query: cappedQuery,
-      orgId,
-      supabase,
-      tokenCache,
-    });
-
-    const recordIds = queryResult.records.map((r) => r.Id as string);
-
-    if (recordIds.length === 0) {
-      return NextResponse.json(
-        { error: 'Query returned no records', code: 'NO_RECORDS' },
-        { status: 400 },
-      );
-    }
-
-    // Defense in depth: the SOQL LIMIT should prevent this, but belt-and-suspenders
-    // in case the LIMIT injection is ever bypassed.
-    if (recordIds.length > userBatchCap) {
-      return NextResponse.json(
-        {
-          error: `Query returned ${recordIds.length} records, which exceeds your batch-size limit of ${userBatchCap}. Narrow your query or ask an admin to raise your limit.`,
-          code: 'BATCH_TOO_LARGE',
-          totalRecords: recordIds.length,
-          maxAllowed: userBatchCap,
-        },
-        { status: 400 },
-      );
-    }
-
-    // Create batch
-    const batchId = await createBatch({
-      supabase,
-      orgId,
-      userId: ctx.userId,
-      triggerType: 'soql_query',
-      objectType,
-      dryRun,
-      totalRecords: recordIds.length,
-      soqlQuery: cappedQuery,
-    });
-
-    // Process records sequentially in the background (after returning 202)
-    // Note: In Vercel serverless, we can't truly background this after the response.
-    // Instead we process inline and rely on maxDuration=300s.
-    processRecords({
-      batchId,
-      recordIds,
-      objectType,
-      dryRun,
-      fieldBatches,
-      fieldNames,
-      supabase,
-      orgId,
-      userId: ctx.userId,
-    }).catch((err) => {
-      console.error('[data-entry] Batch processing failed:', err);
-    });
-
-    return NextResponse.json(
-      {
-        batchId,
-        totalRecords: recordIds.length,
-        status: 'running',
-        message: `Processing ${recordIds.length} records`,
-      },
-      { status: 202 },
-    );
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    return NextResponse.json(
-      { error: message, code: 'BATCH_FAILED' },
-      { status: 500 },
-    );
-  }
-}
-
-async function processRecords(params: {
-  batchId: string;
-  recordIds: string[];
-  objectType: 'Lead' | 'Opportunity';
-  dryRun: boolean;
-  fieldBatches?: string[];
-  fieldNames?: string[];
-  supabase: ReturnType<typeof createServiceClient>;
-  orgId: string;
-  userId: string | null;
-}): Promise<void> {
-  const { batchId, recordIds, objectType, dryRun, fieldBatches, fieldNames, supabase, orgId, userId } = params;
-  let completed = 0;
-  let failed = 0;
-
-  for (const recordId of recordIds) {
-    try {
-      const result = await runPipeline({
-        input: {
-          recordId,
-          objectType,
-          orgId,
-          userId,
-          dryRun,
-          fieldBatches,
-          fieldNames,
-        },
-        supabase,
-        tokenCache,
-        // Attach this run to the parent batch we created above; runPipeline
-        // will atomically increment its progress counter as it finishes.
-        existingBatchId: batchId,
-        triggerType: 'soql_query',
-      });
-
-      if (result.status === 'completed') {
-        completed++;
-      } else {
-        failed++;
-      }
-    } catch {
-      failed++;
-    }
-  }
-
-  await completeBatch({
-    supabase,
-    batchId,
-    completedRecords: completed,
-    failedRecords: failed,
-  });
+  return Response.json({ queued: recordIds.length });
 }

@@ -1,15 +1,24 @@
 /**
- * POST /api/data-entry/prompts/[id]/activate — Set this version as active,
- * deactivating any currently active version. Used for rolling back to a
- * previous version from the history view.
+ * POST /api/data-entry/prompts/[id] — Activate / roll back to a prompt version.
  *
- * Pattern matches Next.js dynamic segment; we handle "activate" via the
- * URL suffix checked in code.
+ * The [id] is a single config.prompt_versions slot-row id. We resolve its
+ * version, then for this agent (AGENT_REF) deactivate every slot and activate
+ * BOTH slots (system + extraction) at that version, so the active prompt is a
+ * consistent pair. Returns the now-active merged version in the legacy
+ * `{ prompt }` shape the history view expects.
+ *
+ * Pattern matches Next.js dynamic segment; the UI calls this for rollback.
  */
 
 import { NextResponse } from 'next/server';
 import { createServiceClient } from '@/lib/supabase/server';
 import { getAuthContext } from '@/lib/auth';
+import {
+  AGENT_REF,
+  jsonError,
+  mergePromptVersions,
+  type PromptSlotRow,
+} from '@/lib/revops/mappers';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -20,37 +29,67 @@ export async function POST(
 ) {
   const { id } = await params;
   const ctx = await getAuthContext();
-  if (!ctx) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+  if (!ctx) return jsonError('Unauthorized', 401, 'UNAUTHORIZED');
   if (!ctx.permissions.modules.data_entry.can_edit_prompts) {
-    return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
+    return jsonError('Forbidden', 403, 'FORBIDDEN');
   }
+
   const supabase = createServiceClient();
 
-  // Deactivate all, then activate the target
+  // 1. Resolve the target version from the slot-row id (scoped to this agent).
+  const { data: target, error: lookupErr } = await supabase
+    .from('config.prompt_versions')
+    .select('version')
+    .eq('id', id)
+    .eq('agent_ref', AGENT_REF)
+    .maybeSingle();
+
+  if (lookupErr) {
+    return jsonError(lookupErr.message, 500, 'QUERY_FAILED');
+  }
+  if (!target) {
+    return jsonError('Prompt not found', 404, 'NOT_FOUND');
+  }
+
+  const version = target.version as number;
+
+  // 2. Deactivate every slot for this agent.
   const { error: deactErr } = await supabase
-    .from('de_prompts')
+    .from('config.prompt_versions')
     .update({ is_active: false })
-    .eq('org_id', ctx.orgId)
-    .eq('is_active', true);
+    .eq('agent_ref', AGENT_REF);
 
   if (deactErr) {
-    return NextResponse.json({ error: deactErr.message, code: 'DEACTIVATE_FAILED' }, { status: 500 });
+    return jsonError(deactErr.message, 500, 'DEACTIVATE_FAILED');
   }
 
-  const { data, error } = await supabase
-    .from('de_prompts')
+  // 3. Activate both slots at the resolved version.
+  const { error: actErr } = await supabase
+    .from('config.prompt_versions')
     .update({ is_active: true })
-    .eq('id', id)
-    .eq('org_id', ctx.orgId)
-    .select()
-    .single();
+    .eq('agent_ref', AGENT_REF)
+    .eq('version', version);
 
-  if (error || !data) {
-    return NextResponse.json(
-      { error: error?.message ?? 'Prompt not found', code: 'ACTIVATE_FAILED' },
-      { status: error ? 500 : 404 },
-    );
+  if (actErr) {
+    return jsonError(actErr.message, 500, 'ACTIVATE_FAILED');
   }
 
-  return NextResponse.json({ prompt: data });
+  // 4. Read back both slot-rows at that version and merge into the UI shape.
+  const { data: rows, error: readErr } = await supabase
+    .from('config.prompt_versions')
+    .select('id, slot, version, body, is_active, notes, created_at')
+    .eq('agent_ref', AGENT_REF)
+    .eq('version', version);
+
+  if (readErr) {
+    return jsonError(readErr.message, 500, 'QUERY_FAILED');
+  }
+
+  const merged = mergePromptVersions((rows ?? []) as PromptSlotRow[]);
+  const prompt = merged[0] ?? null;
+  if (!prompt) {
+    return jsonError('Prompt not found', 404, 'NOT_FOUND');
+  }
+
+  return NextResponse.json({ prompt });
 }

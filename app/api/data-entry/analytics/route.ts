@@ -1,8 +1,11 @@
 /**
  * GET /api/data-entry/analytics
  *
- * Aggregate skip-reason analytics across all extractions, so you can see
- * which fields are getting skipped the most and WHY.
+ * Aggregate skip-reason analytics across all extractions for this agent, so you
+ * can see which fields are getting skipped the most and WHY.
+ *
+ * Reads runs.field_extractions (scoped by agent_ref) and aggregates server-side
+ * via GROUP BY (revopsQuery) instead of paginating raw rows.
  *
  * Query params:
  *   ?days=N           — look back N days (default: 30)
@@ -10,178 +13,242 @@
  */
 
 import { NextResponse } from 'next/server';
-import { createServiceClient } from '@/lib/supabase/server';
 import { getAuthContext } from '@/lib/auth';
+import { AGENT_REF, jsonError, confidenceToNumber } from '@/lib/revops/mappers';
+import { revopsQuery } from '@/lib/revops/sql-client';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
+// write_outcome categorization — mirrors lib/revops/mappers#extractionCounts:
+//   written  → write_outcome = 'written'
+//   errored  → write_outcome IN ('invalid','sf_rejected','write_silently_dropped','write_failed')
+//   skipped  → everything else (dry_run / skipped_* / null)
+const ERRORED_OUTCOMES = ['invalid', 'sf_rejected', 'write_silently_dropped', 'write_failed'];
+
+type CountRow = {
+  field_api_name: string;
+  sf_object: string;
+  group_key: string | null;
+  written: string | number;
+  skipped: string | number;
+  errored: string | number;
+  total: string | number;
+};
+
+type SkipReasonRow = { skip_reason: string | null; count: string | number };
+
+type FieldConfidenceRow = {
+  field_api_name: string;
+  sf_object: string;
+  confidence: string | null;
+  count: string | number;
+};
+
+type ConfidenceRow = { confidence: string | null; count: string | number };
+
+const toNum = (v: string | number | null | undefined): number =>
+  typeof v === 'number' ? v : v == null ? 0 : Number(v) || 0;
+
 export async function GET(request: Request) {
   const ctx = await getAuthContext();
-  if (!ctx) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+  if (!ctx) return jsonError('Unauthorized', 401, 'UNAUTHORIZED');
   if (!ctx.permissions.modules.data_entry.can_view_analytics) {
-    return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
+    return jsonError('Forbidden', 403, 'FORBIDDEN');
   }
 
   const { searchParams } = new URL(request.url);
   const days = Math.min(Math.max(parseInt(searchParams.get('days') ?? '30', 10), 1), 365);
   const objectType = searchParams.get('objectType');
 
-  const supabase = createServiceClient();
   const sinceIso = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
 
-  // ── Pagination ──────────────────────────────────────
-  // Supabase's PostgREST layer caps responses at 1000 rows by default
-  // (the `max-rows` setting). .limit(100_000) does not override this —
-  // it's a server-side hard ceiling. So we paginate via .range() until
-  // we've pulled everything. Hard cap at 100k rows for safety; beyond
-  // that we'd need a Postgres RPC for server-side aggregation.
-  const PAGE_SIZE = 1000;
-  const HARD_CAP = 100_000;
-  type ExtRow = {
-    field_name: string;
-    sf_object: string;
-    batch_id: string;
-    was_written: boolean;
-    skip_reason: string | null;
-    validation_errors: string[] | null;
-    confidence: number | null;
-    created_at: string;
-  };
-
-  const extractions: ExtRow[] = [];
-
-  for (let offset = 0; offset < HARD_CAP; offset += PAGE_SIZE) {
-    let query = supabase
-      .from('de_extractions')
-      .select('field_name, sf_object, batch_id, was_written, skip_reason, validation_errors, confidence, created_at')
-      .eq('org_id', ctx.orgId)
-      .gte('created_at', sinceIso)
-      .order('created_at', { ascending: false })
-      .range(offset, offset + PAGE_SIZE - 1);
-
-    if (objectType) {
-      query = query.eq('sf_object', objectType);
-    }
-
-    const { data, error } = await query;
-
-    if (error) {
-      return NextResponse.json({ error: error.message, code: 'QUERY_FAILED' }, { status: 500 });
-    }
-
-    const page = (data ?? []) as ExtRow[];
-    extractions.push(...page);
-
-    // Done when the page returned fewer rows than requested
-    if (page.length < PAGE_SIZE) break;
+  // Shared WHERE scope: this agent, within the lookback window, optional object.
+  // $1 = AGENT_REF, $2 = sinceIso, $3 = objectType (only when present).
+  const params: unknown[] = [AGENT_REF, sinceIso];
+  let scope = `fe.agent_ref = $1 AND fe.created_at >= $2`;
+  if (objectType) {
+    params.push(objectType);
+    scope += ` AND fe.sf_object = $3`;
   }
 
-  // ── Aggregate 1: skip reasons across all extractions ──
-  const skipReasonCounts = new Map<string, number>();
-  // ── Aggregate 2: per-field stats ──
-  type FieldStat = {
-    fieldName: string;
-    sfObject: string;
-    batchId: string;
-    totalAttempts: number;
-    written: number;
-    skipped: number;
-    errored: number;
-    skipReasons: Record<string, number>;
-    avgConfidence: number;
-    confidenceSum: number;
-    confidenceCount: number;
-  };
-  const perField = new Map<string, FieldStat>();
-  // ── Aggregate 3: confidence distribution ──
-  const confidenceBuckets = { high: 0, medium: 0, low: 0, null: 0 };
+  const erroredCase = `fe.write_outcome = ANY($${params.length + 1})`;
+  const queryParams = [...params, ERRORED_OUTCOMES];
 
-  for (const ext of extractions) {
-    // Skip-reason counts
-    if (!ext.was_written && ext.skip_reason) {
-      skipReasonCounts.set(ext.skip_reason, (skipReasonCounts.get(ext.skip_reason) ?? 0) + 1);
+  // CASE expressions used by both totals and per-field aggregations.
+  const writtenExpr = `COUNT(*) FILTER (WHERE fe.write_outcome = 'written')`;
+  const erroredExpr = `COUNT(*) FILTER (WHERE ${erroredCase})`;
+  const skippedExpr = `COUNT(*) FILTER (WHERE fe.write_outcome IS DISTINCT FROM 'written' AND NOT (${erroredCase}))`;
+
+  try {
+    const [perFieldRows, skipReasonRows, fieldConfidenceRows, confidenceRows] = await Promise.all([
+      // ── Per-field stats: written / skipped / errored / total ──
+      revopsQuery<CountRow>(
+        `SELECT
+            fe.field_api_name                AS field_api_name,
+            fe.sf_object                     AS sf_object,
+            MIN(fe.group_key)                AS group_key,
+            ${writtenExpr}                   AS written,
+            ${skippedExpr}                   AS skipped,
+            ${erroredExpr}                   AS errored,
+            COUNT(*)                         AS total
+           FROM runs.field_extractions fe
+          WHERE ${scope}
+          GROUP BY fe.field_api_name, fe.sf_object`,
+        queryParams,
+      ),
+      // ── Skip-reason distribution (non-written rows with a skip_reason) ──
+      revopsQuery<SkipReasonRow>(
+        `SELECT
+            fe.skip_reason AS skip_reason,
+            COUNT(*)       AS count
+           FROM runs.field_extractions fe
+          WHERE ${scope}
+            AND fe.write_outcome IS DISTINCT FROM 'written'
+            AND fe.skip_reason IS NOT NULL
+          GROUP BY fe.skip_reason
+          ORDER BY count DESC`,
+        params,
+      ),
+      // ── Per-field × confidence (text buckets) for avg-confidence rollup ──
+      revopsQuery<FieldConfidenceRow>(
+        `SELECT
+            fe.field_api_name AS field_api_name,
+            fe.sf_object      AS sf_object,
+            fe.confidence     AS confidence,
+            COUNT(*)          AS count
+           FROM runs.field_extractions fe
+          WHERE ${scope}
+          GROUP BY fe.field_api_name, fe.sf_object, fe.confidence`,
+        params,
+      ),
+      // ── Confidence distribution across all extractions ──
+      revopsQuery<ConfidenceRow>(
+        `SELECT
+            fe.confidence AS confidence,
+            COUNT(*)      AS count
+           FROM runs.field_extractions fe
+          WHERE ${scope}
+          GROUP BY fe.confidence`,
+        params,
+      ),
+    ]);
+
+    // ── Per-field skip-reason map (for perField[].skipReasons) ──
+    const skipByField = await revopsQuery<{
+      field_api_name: string;
+      sf_object: string;
+      skip_reason: string | null;
+      count: string | number;
+    }>(
+      `SELECT
+          fe.field_api_name AS field_api_name,
+          fe.sf_object      AS sf_object,
+          fe.skip_reason    AS skip_reason,
+          COUNT(*)          AS count
+         FROM runs.field_extractions fe
+        WHERE ${scope}
+          AND fe.write_outcome IS DISTINCT FROM 'written'
+          AND fe.skip_reason IS NOT NULL
+        GROUP BY fe.field_api_name, fe.sf_object, fe.skip_reason`,
+      params,
+    );
+
+    // Index per-field skip reasons by field key.
+    const skipReasonsByField = new Map<string, Record<string, number>>();
+    for (const r of skipByField) {
+      const key = `${r.sf_object}|${r.field_api_name}`;
+      const bucket = skipReasonsByField.get(key) ?? {};
+      if (r.skip_reason) bucket[r.skip_reason] = (bucket[r.skip_reason] ?? 0) + toNum(r.count);
+      skipReasonsByField.set(key, bucket);
     }
 
-    // Per-field stats
-    const key = `${ext.sf_object}|${ext.field_name}`;
-    if (!perField.has(key)) {
-      perField.set(key, {
-        fieldName: ext.field_name,
-        sfObject: ext.sf_object,
-        batchId: ext.batch_id,
-        totalAttempts: 0,
-        written: 0,
-        skipped: 0,
-        errored: 0,
-        skipReasons: {},
-        avgConfidence: 0,
-        confidenceSum: 0,
-        confidenceCount: 0,
+    // Index per-field confidence sums/counts (confidence stored as text → numeric).
+    const confByField = new Map<string, { sum: number; count: number }>();
+    for (const r of fieldConfidenceRows) {
+      const key = `${r.sf_object}|${r.field_api_name}`;
+      const n = confidenceToNumber(r.confidence);
+      if (n == null) continue;
+      const acc = confByField.get(key) ?? { sum: 0, count: 0 };
+      const c = toNum(r.count);
+      acc.sum += n * c;
+      acc.count += c;
+      confByField.set(key, acc);
+    }
+
+    // ── Totals ──
+    const totals = perFieldRows.reduce(
+      (acc, row) => {
+        acc.extractions += toNum(row.total);
+        acc.written += toNum(row.written);
+        acc.skipped += toNum(row.skipped);
+        acc.errored += toNum(row.errored);
+        return acc;
+      },
+      { extractions: 0, written: 0, skipped: 0, errored: 0 },
+    );
+
+    // ── perField array (same shape the UI consumes) ──
+    const perField = perFieldRows
+      .map((row) => {
+        const key = `${row.sf_object}|${row.field_api_name}`;
+        const conf = confByField.get(key) ?? { sum: 0, count: 0 };
+        const totalAttempts = toNum(row.total);
+        const written = toNum(row.written);
+        const skipped = toNum(row.skipped);
+        const errored = toNum(row.errored);
+        return {
+          fieldName: row.field_api_name,
+          sfObject: row.sf_object,
+          batchId: row.group_key ?? '',
+          totalAttempts,
+          written,
+          skipped,
+          errored,
+          skipReasons: skipReasonsByField.get(key) ?? {},
+          avgConfidence: conf.count > 0 ? conf.sum / conf.count : 0,
+          confidenceSum: conf.sum,
+          confidenceCount: conf.count,
+          skipRate: totalAttempts > 0 ? (skipped + errored) / totalAttempts : 0,
+        };
+      })
+      .sort((a, b) => {
+        const aSkipTotal = a.skipped + a.errored;
+        const bSkipTotal = b.skipped + b.errored;
+        if (aSkipTotal !== bSkipTotal) return bSkipTotal - aSkipTotal;
+        return b.totalAttempts - a.totalAttempts;
       });
-    }
-    const stat = perField.get(key)!;
-    stat.totalAttempts++;
-    if (ext.was_written) {
-      stat.written++;
-    } else {
-      if (ext.validation_errors && ext.validation_errors.length > 0) {
-        stat.errored++;
-      } else {
-        stat.skipped++;
-      }
-      if (ext.skip_reason) {
-        stat.skipReasons[ext.skip_reason] = (stat.skipReasons[ext.skip_reason] ?? 0) + 1;
-      }
-    }
-    if (typeof ext.confidence === 'number') {
-      stat.confidenceSum += ext.confidence;
-      stat.confidenceCount++;
+
+    // ── skipReasons (global distribution) ──
+    const skipReasons = skipReasonRows
+      .filter((r) => r.skip_reason)
+      .map((r) => ({ reason: r.skip_reason as string, count: toNum(r.count) }))
+      .sort((a, b) => b.count - a.count);
+
+    // ── confidenceDistribution: text buckets → high/medium/low/null ──
+    const confidenceDistribution = { high: 0, medium: 0, low: 0, null: 0 };
+    for (const r of confidenceRows) {
+      const n = confidenceToNumber(r.confidence);
+      const c = toNum(r.count);
+      if (n == null) confidenceDistribution.null += c;
+      else if (n >= 0.9) confidenceDistribution.high += c;
+      else if (n >= 0.7) confidenceDistribution.medium += c;
+      else confidenceDistribution.low += c;
     }
 
-    // Confidence distribution
-    if (typeof ext.confidence !== 'number') {
-      confidenceBuckets.null++;
-    } else if (ext.confidence >= 0.9) {
-      confidenceBuckets.high++;
-    } else if (ext.confidence >= 0.7) {
-      confidenceBuckets.medium++;
-    } else {
-      confidenceBuckets.low++;
-    }
+    return NextResponse.json({
+      period: { days, since: sinceIso },
+      // Server-side aggregation no longer paginates client rows, so there is no
+      // pagination ceiling to report. Kept for response-shape compatibility.
+      truncated: false,
+      hardCap: null,
+      totals,
+      skipReasons,
+      perField,
+      confidenceDistribution,
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'Analytics query failed';
+    return jsonError(message, 500, 'QUERY_FAILED');
   }
-
-  // Finalize averages
-  const perFieldArray = [...perField.values()].map((stat) => ({
-    ...stat,
-    avgConfidence: stat.confidenceCount > 0 ? stat.confidenceSum / stat.confidenceCount : 0,
-    // Compute skip rate for sorting
-    skipRate: stat.totalAttempts > 0 ? (stat.skipped + stat.errored) / stat.totalAttempts : 0,
-  }));
-
-  // Tell the UI if we hit the pagination cap so it can warn the user.
-  const hitCap = extractions.length >= HARD_CAP;
-
-  return NextResponse.json({
-    period: { days, since: sinceIso },
-    truncated: hitCap,
-    hardCap: HARD_CAP,
-    totals: {
-      extractions: extractions.length,
-      written: extractions.filter((e) => e.was_written).length,
-      skipped: extractions.filter((e) => !e.was_written && (!e.validation_errors || e.validation_errors.length === 0)).length,
-      errored: extractions.filter((e) => e.validation_errors && e.validation_errors.length > 0).length,
-    },
-    skipReasons: [...skipReasonCounts.entries()]
-      .map(([reason, count]) => ({ reason, count }))
-      .sort((a, b) => b.count - a.count),
-    perField: perFieldArray.sort((a, b) => {
-      // Primary: by total skip+error count descending (most problematic first)
-      const aSkipTotal = a.skipped + a.errored;
-      const bSkipTotal = b.skipped + b.errored;
-      if (aSkipTotal !== bSkipTotal) return bSkipTotal - aSkipTotal;
-      return b.totalAttempts - a.totalAttempts;
-    }),
-    confidenceDistribution: confidenceBuckets,
-  });
 }

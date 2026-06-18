@@ -1,18 +1,18 @@
 /**
- * GET /api/data-entry/queue — List queued webhook records.
+ * GET /api/data-entry/queue — List queued dispatch records for this agent.
  */
 
 import { NextResponse } from 'next/server';
 import { createServiceClient } from '@/lib/supabase/server';
 import { getAuthContext } from '@/lib/auth';
+import { AGENT_REF, jsonError, mapQueue } from '@/lib/revops/mappers';
 
 export const runtime = 'nodejs';
 
 export async function GET(request: Request) {
   const ctx = await getAuthContext();
-  if (!ctx) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
   if (!ctx.permissions.modules.data_entry.access) {
-    return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
+    return jsonError('Forbidden', 403, 'FORBIDDEN');
   }
 
   const { searchParams } = new URL(request.url);
@@ -23,24 +23,26 @@ export async function GET(request: Request) {
   const supabase = createServiceClient();
 
   let query = supabase
-    .from('data_entry_queue')
-    .select('id, record_id, object_type, trigger_event, scheduled_at, status, attempts, max_attempts, last_error, run_id, delay_minutes, created_at, processed_at')
-    .eq('org_id', ctx.orgId)
-    .order('created_at', { ascending: false })
+    .from('runs.dispatch_queue')
+    .select(
+      'id, subject_id, subject_kind, payload, enqueued_by, enqueued_at, status, attempts, max_attempts, last_error, dispatched_run_id, updated_at, dry_run',
+    )
+    .eq('agent_ref', AGENT_REF)
+    .order('enqueued_at', { ascending: false })
     .limit(limit);
 
   if (status) query = query.eq('status', status);
   if (recordId) {
     // Salesforce IDs are 15 or 18 chars — the 15-char version is always a
     // prefix of the 18-char version, so use a prefix match.
-    query = query.like('record_id', `${recordId}%`);
+    query = query.like('subject_id', `${recordId}%`);
   }
 
   const { data, error } = await query;
 
   if (error) {
-    return NextResponse.json({ error: error.message, code: 'QUERY_FAILED' }, { status: 500 });
+    return jsonError(error.message, 500, 'QUERY_FAILED');
   }
 
-  return NextResponse.json({ queue: data ?? [] });
+  return NextResponse.json({ queue: (data ?? []).map(mapQueue) });
 }
