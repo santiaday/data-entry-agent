@@ -1,10 +1,16 @@
 /**
  * GET /api/data-entry/runs/[id] — Get run detail with all extractions.
+ *
+ * Assembles a run detail from runs.agent_runs + runs.field_extractions.
+ * Pipeline-only diagnostics (performance / fetch inventory / write results)
+ * are no longer captured by the UI surface, so they are returned as
+ * null/[] to keep the client-facing shape stable without fabricating data.
  */
 
 import { NextResponse } from 'next/server';
 import { createServiceClient } from '@/lib/supabase/server';
 import { getAuthContext } from '@/lib/auth';
+import { AGENT_REF, jsonError, mapRun, mapExtraction, extractionCounts } from '@/lib/revops/mappers';
 
 export const runtime = 'nodejs';
 
@@ -13,69 +19,79 @@ export async function GET(
   { params }: { params: Promise<{ id: string }> },
 ) {
   const { id } = await params;
+
   const ctx = await getAuthContext();
-  if (!ctx) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+  if (!ctx) return jsonError('Unauthorized', 401, 'UNAUTHORIZED');
   if (!ctx.permissions.modules.data_entry.access) {
-    return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
+    return jsonError('Forbidden', 403, 'FORBIDDEN');
   }
+
   const supabase = createServiceClient();
 
   const [runRes, extractionsRes] = await Promise.all([
     supabase
-      .from('de_runs')
+      .from('runs.agent_runs')
       .select('*')
-      .eq('id', id)
-      .eq('org_id', ctx.orgId)
+      .eq('run_id', id)
+      .eq('agent_ref', AGENT_REF) // scope: never disclose another agent's run by id
       .maybeSingle(),
     supabase
-      .from('de_extractions')
-      .select('id, field_name, sf_object, batch_id, extracted_value, current_sf_value, write_mode, confidence, evidence, was_written, skip_reason, validation_errors, created_at')
+      .from('runs.field_extractions')
+      .select('*')
       .eq('run_id', id)
-      .eq('org_id', ctx.orgId)
-      .order('batch_id', { ascending: true })
-      .order('field_name', { ascending: true }),
+      .eq('agent_ref', AGENT_REF)
+      .order('created_at', { ascending: true }),
   ]);
 
   if (runRes.error) {
-    return NextResponse.json({ error: runRes.error.message, code: 'QUERY_FAILED' }, { status: 500 });
+    return jsonError(runRes.error.message, 500, 'QUERY_FAILED');
   }
 
   if (!runRes.data) {
-    return NextResponse.json({ error: 'Run not found', code: 'NOT_FOUND' }, { status: 404 });
+    return jsonError('Run not found', 404, 'NOT_FOUND');
   }
 
-  // Attach the parent batch (originally a PostgREST embedded resource).
-  const run = runRes.data as Record<string, unknown> & { batch_id?: string | null };
-  if (run.batch_id) {
-    const batchRes = await supabase
-      .from('de_batches')
-      .select('trigger_type, soql_query, dry_run')
-      .eq('id', run.batch_id)
-      .maybeSingle();
-    run.de_batches = batchRes.data ?? null;
-  } else {
-    run.de_batches = null;
+  if (extractionsRes.error) {
+    return jsonError(extractionsRes.error.message, 500, 'QUERY_FAILED');
   }
 
-  // Compute summary stats by batch
-  const extractions = extractionsRes.data ?? [];
-  const batchSummary = new Map<string, { total: number; written: number; skipped: number; errored: number }>();
+  const extractionRows = (extractionsRes.data ?? []) as Record<string, unknown>[];
+  const extractions = extractionRows.map((row) => mapExtraction(row));
+  const counts = extractionCounts(extractionRows);
 
+  // Per-batch (group_key) rollup the UI shows alongside the run.
+  const batchSummary: Record<string, { total: number; written: number; skipped: number; errored: number }> = {};
   for (const ext of extractions) {
-    const key = ext.batch_id;
-    if (!batchSummary.has(key)) {
-      batchSummary.set(key, { total: 0, written: 0, skipped: 0, errored: 0 });
+    const key = ext.batch_id ?? '';
+    if (!batchSummary[key]) {
+      batchSummary[key] = { total: 0, written: 0, skipped: 0, errored: 0 };
     }
-    const summary = batchSummary.get(key)!;
-    summary.total++;
-    if (ext.was_written) summary.written++;
-    else if (ext.validation_errors && ext.validation_errors.length > 0) summary.errored++;
-    else if (ext.skip_reason) summary.skipped++;
+    batchSummary[key].total++;
+    if (ext.was_written) batchSummary[key].written++;
+    else if (ext.validation_errors && ext.validation_errors.length > 0) batchSummary[key].errored++;
+    else if (ext.skip_reason) batchSummary[key].skipped++;
   }
+
+  // mapRun supplies the RunListItem core; the detail view also reads a set of
+  // pipeline-only diagnostic fields. Those are no longer produced by the UI
+  // surface, so expose stable empty defaults rather than fabricated data.
+  const run = {
+    ...mapRun(runRes.data as Record<string, unknown>, counts),
+    batch_id: (runRes.data as Record<string, unknown>).batch_id ?? null,
+    fetch_errors: null,
+    batch_errors: null,
+    write_results: null,
+    fetch_inventory: null,
+    phase_timings: null,
+    batch_executions: null,
+    total_prompt_tokens: null,
+    total_completion_tokens: null,
+    de_batches: null,
+  };
 
   return NextResponse.json({
-    run: runRes.data,
+    run,
     extractions,
-    batchSummary: Object.fromEntries(batchSummary),
+    batchSummary,
   });
 }

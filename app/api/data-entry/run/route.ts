@@ -1,36 +1,33 @@
 /**
- * POST /api/data-entry/run — Run the Data Entry Agent for a single record.
+ * POST /api/data-entry/run — Enqueue a single Data Entry Agent run.
  *
- * Returns an SSE stream with per-phase and per-field progress events.
+ * Thin trigger: validates the request and inserts ONE row into
+ * runs.dispatch_queue. The cron-driver drains the queue and executes the
+ * actual extraction; the UI never runs the pipeline itself.
  */
 
 import { z } from 'zod';
 import { getAuthContext } from '@/lib/auth';
-import { SalesforceTokenCache } from '@/lib/sf';
-import { runPipeline, type PipelineEvent } from '@/lib/pipeline';
 import { createServiceClient } from '@/lib/supabase/server';
+import { AGENT_REF, jsonError } from '@/lib/revops/mappers';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
-export const maxDuration = 300;
-
-const tokenCache = new SalesforceTokenCache();
 
 const requestSchema = z.object({
-  recordId: z.string().min(15).max(18),
+  recordId: z.string().regex(/^[A-Za-z0-9]{15,18}$/, 'Invalid Salesforce record id'),
   objectType: z.enum(['Lead', 'Opportunity']),
-  dryRun: z.boolean().optional().default(false),
-  fieldBatches: z.array(z.string()).optional(),
-  fieldNames: z.array(z.string()).optional(),
+  dryRun: z.boolean().optional().default(true),
+  fieldGroups: z.array(z.string()).optional(),
 });
 
 export async function POST(request: Request) {
   const ctx = await getAuthContext();
   if (!ctx) return jsonError('Unauthorized', 401);
+
   const dePerms = ctx.permissions.modules.data_entry;
-  if (!dePerms.access || !dePerms.can_run_batches) {
-    return jsonError('Forbidden', 403);
-  }
+  if (!dePerms.access) return jsonError('Forbidden', 403);
+  if (!dePerms.can_run_batches) return jsonError('Forbidden', 403);
 
   let body: unknown;
   try {
@@ -44,54 +41,34 @@ export async function POST(request: Request) {
     return jsonError(`Invalid request: ${parsed.error.message}`, 400);
   }
 
-  const { recordId, objectType, dryRun, fieldBatches, fieldNames } = parsed.data;
+  const { recordId, objectType, dryRun, fieldGroups } = parsed.data;
   const supabase = createServiceClient();
 
-  const encoder = new TextEncoder();
-  const stream = new ReadableStream<Uint8Array>({
-    async start(controller) {
-      const send = (event: PipelineEvent | Record<string, unknown>) => {
-        controller.enqueue(
-          encoder.encode(`data: ${JSON.stringify(event)}\n\n`),
-        );
-      };
+  const { data, error } = await supabase
+    .from('runs.dispatch_queue')
+    .insert({
+      agent_ref: AGENT_REF,
+      subject_id: recordId,
+      subject_kind: objectType,
+      payload: {
+        record_id: recordId,
+        record_type: objectType,
+        dry_run: dryRun,
+        field_groups: fieldGroups ?? null,
+      },
+      dry_run: dryRun,
+      enqueued_by: ctx.email ?? 'ui',
+    })
+    .select('id')
+    .single();
 
-      try {
-        const result = await runPipeline({
-          input: {
-            recordId,
-            objectType,
-            orgId: ctx.orgId,
-            userId: ctx.userId,
-            dryRun,
-            fieldBatches,
-            fieldNames,
-          },
-          supabase,
-          tokenCache,
-          onEvent: send,
-        });
+  if (error) {
+    return jsonError(`Failed to enqueue run: ${error.message}`, 500);
+  }
 
-        // The pipeline already emits a 'done' event, but include the full result
-        send({ type: 'result', ...result });
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        send({ type: 'error', error: message });
-      } finally {
-        controller.close();
-      }
-    },
-  });
+  if (!data) {
+    return jsonError('Failed to enqueue run', 500);
+  }
 
-  return new Response(stream, {
-    headers: {
-      'Content-Type': 'text/event-stream',
-      'Cache-Control': 'no-cache',
-      Connection: 'keep-alive',
-    },
-  });
-}
-
-function jsonError(message: string, status: number) {
-  return Response.json({ error: message, code: 'INVALID_REQUEST' }, { status });
+  return Response.json({ queued: true, id: data.id, dry_run: dryRun });
 }

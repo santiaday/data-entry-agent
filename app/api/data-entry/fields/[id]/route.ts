@@ -1,12 +1,15 @@
 /**
  * PUT    /api/data-entry/fields/[id] — Update a field config (partial).
  * DELETE /api/data-entry/fields/[id] — Soft delete (sets is_active = false).
+ *
+ * [id] is the field_key. Rows live in config.field_definitions and are scoped
+ * by agent_ref = AGENT_REF (there is no org_id). Both verbs require can_edit_fields.
  */
 
-import { NextResponse } from 'next/server';
 import { z } from 'zod';
 import { createServiceClient } from '@/lib/supabase/server';
 import { getAuthContext } from '@/lib/auth';
+import { AGENT_REF, jsonError, mapField } from '@/lib/revops/mappers';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -14,16 +17,32 @@ export const dynamic = 'force-dynamic';
 const updateSchema = z.object({
   instruction: z.string().min(10).max(5000).optional(),
   writeMode: z.enum(['overwrite', 'fill_blank', 'append']).optional(),
-  valueType: z.enum(['picklist', 'multipicklist', 'text', 'textarea', 'number', 'date', 'datetime', 'boolean']).optional(),
+  valueType: z
+    .enum([
+      'picklist',
+      'multipicklist',
+      'text',
+      'textarea',
+      'number',
+      'currency',
+      'date',
+      'datetime',
+      'boolean',
+    ])
+    .optional(),
   batchId: z.string().min(1).optional(),
   options: z.array(z.string()).nullable().optional(),
-  validation: z.object({
-    maxLength: z.number().int().positive().optional(),
-    min: z.number().optional(),
-    max: z.number().optional(),
-    dateFormat: z.enum(['YYYY-MM-DD', 'YYYY-MM-DDTHH:MM:SSZ']).optional(),
-  }).nullable().optional(),
+  validation: z
+    .object({
+      maxLength: z.number().int().positive().optional(),
+      min: z.number().optional(),
+      max: z.number().optional(),
+      dateFormat: z.enum(['YYYY-MM-DD', 'YYYY-MM-DDTHH:MM:SSZ']).optional(),
+    })
+    .nullable()
+    .optional(),
   isActive: z.boolean().optional(),
+  sortOrder: z.number().int().optional(),
 });
 
 export async function PUT(
@@ -33,49 +52,56 @@ export async function PUT(
   const { id } = await params;
 
   const ctx = await getAuthContext();
-  if (!ctx) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
   if (!ctx.permissions.modules.data_entry.can_edit_fields) {
-    return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
+    return jsonError('Forbidden', 403, 'FORBIDDEN');
   }
 
   let body: unknown;
   try {
     body = await request.json();
   } catch {
-    return NextResponse.json({ error: 'Invalid JSON body', code: 'INVALID_REQUEST' }, { status: 400 });
+    return jsonError('Invalid JSON body', 400, 'INVALID_REQUEST');
   }
 
   const parsed = updateSchema.safeParse(body);
   if (!parsed.success) {
-    return NextResponse.json({ error: parsed.error.message, code: 'INVALID_REQUEST' }, { status: 400 });
+    return jsonError(parsed.error.message, 400, 'INVALID_REQUEST');
   }
 
-  const supabase = createServiceClient();
   const input = parsed.data;
+  const supabase = createServiceClient();
 
-  // Build dynamic update — only include fields that were provided
-  const update: Record<string, unknown> = { updated_at: new Date().toISOString() };
+  // Build dynamic update — only include columns that were provided.
+  // The table's updated_at has a now() default but no trigger, so set it here.
+  const update: Record<string, unknown> = {
+    updated_by: ctx.email ?? 'system',
+    updated_at: new Date().toISOString(),
+  };
   if (input.instruction !== undefined) update.instruction = input.instruction;
   if (input.writeMode !== undefined) update.write_mode = input.writeMode;
   if (input.valueType !== undefined) update.value_type = input.valueType;
-  if (input.batchId !== undefined) update.batch_id = input.batchId;
+  if (input.batchId !== undefined) update.group_key = input.batchId;
   if (input.options !== undefined) update.options = input.options;
   if (input.validation !== undefined) update.validation = input.validation;
   if (input.isActive !== undefined) update.is_active = input.isActive;
+  if (input.sortOrder !== undefined) update.sort_order = input.sortOrder;
 
   const { data, error } = await supabase
-    .from('de_field_configs')
+    .from('config.field_definitions')
     .update(update)
+    .eq('agent_ref', AGENT_REF)
     .eq('id', id)
-    .eq('org_id', ctx.orgId)
     .select()
     .single();
 
   if (error) {
-    return NextResponse.json({ error: error.message, code: 'UPDATE_FAILED' }, { status: 500 });
+    return jsonError(error.message, 500, 'UPDATE_FAILED');
+  }
+  if (!data) {
+    return jsonError('Field not found', 404, 'NOT_FOUND');
   }
 
-  return NextResponse.json({ field: data });
+  return Response.json({ field: mapField(data) });
 }
 
 export async function DELETE(
@@ -83,23 +109,28 @@ export async function DELETE(
   { params }: { params: Promise<{ id: string }> },
 ) {
   const { id } = await params;
+
   const ctx = await getAuthContext();
-  if (!ctx) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
   if (!ctx.permissions.modules.data_entry.can_edit_fields) {
-    return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
+    return jsonError('Forbidden', 403, 'FORBIDDEN');
   }
+
   const supabase = createServiceClient();
 
   // Soft delete — flip is_active off so runtime skips it but history is preserved.
   const { error } = await supabase
-    .from('de_field_configs')
-    .update({ is_active: false, updated_at: new Date().toISOString() })
-    .eq('id', id)
-    .eq('org_id', ctx.orgId);
+    .from('config.field_definitions')
+    .update({
+      is_active: false,
+      updated_by: ctx.email ?? 'system',
+      updated_at: new Date().toISOString(),
+    })
+    .eq('agent_ref', AGENT_REF)
+    .eq('id', id);
 
   if (error) {
-    return NextResponse.json({ error: error.message, code: 'DELETE_FAILED' }, { status: 500 });
+    return jsonError(error.message, 500, 'DELETE_FAILED');
   }
 
-  return NextResponse.json({ success: true });
+  return Response.json({ success: true });
 }

@@ -57,17 +57,21 @@ async function getColumnTypes(
 ): Promise<Map<string, ColumnType>> {
   const cached = typeCache.get(table);
   if (cached) return cached;
+  const { schema, table: bare } = splitTable(table);
   const res = await exec.query(
     `SELECT column_name, data_type, udt_name
        FROM information_schema.columns
-      WHERE table_schema = 'public' AND table_name = $1`,
-    [table],
+      WHERE table_schema = $1 AND table_name = $2`,
+    [schema, bare],
   );
   const map = new Map<string, ColumnType>();
   for (const row of res.rows as { column_name: string; data_type: string; udt_name: string }[]) {
     map.set(row.column_name, { dataType: row.data_type, udtName: row.udt_name });
   }
-  typeCache.set(table, map);
+  // Don't cache an EMPTY result — a transient introspection failure would
+  // otherwise poison the cache forever and silently mis-encode jsonb/array
+  // writes. Re-introspect next call instead.
+  if (map.size > 0) typeCache.set(table, map);
   return map;
 }
 
@@ -103,6 +107,19 @@ function ident(name: string): string {
     throw new Error(`Unsafe SQL identifier: ${name}`);
   }
   return `"${name}"`;
+}
+
+/** Quote a possibly schema-qualified table reference, e.g. `config.field_definitions`
+ *  → `"config"."field_definitions"`. Each part is validated like a plain ident. */
+function qIdent(name: string): string {
+  return name.split('.').map(ident).join('.');
+}
+
+/** Split a possibly schema-qualified table name into { schema, table }. */
+function splitTable(name: string): { schema: string; table: string } {
+  const parts = name.split('.');
+  if (parts.length === 2) return { schema: parts[0]!, table: parts[1]! };
+  return { schema: 'public', table: name };
 }
 
 // ── Types ───────────────────────────────────────────────────────
@@ -289,8 +306,10 @@ class PgQuery implements PromiseLike<PostgrestResult> {
       });
       sql += ` ORDER BY ${parts.join(', ')}`;
     }
-    if (this.limitN !== null) sql += ` LIMIT ${Number(this.limitN)}`;
-    if (this.offsetN !== null) sql += ` OFFSET ${Number(this.offsetN)}`;
+    // Guard against non-finite values (e.g. a bad `limit` query param) that
+    // would otherwise emit literal `LIMIT NaN` and 500. Drop the clause instead.
+    if (this.limitN !== null && Number.isFinite(this.limitN)) sql += ` LIMIT ${Math.max(0, Math.trunc(this.limitN))}`;
+    if (this.offsetN !== null && Number.isFinite(this.offsetN)) sql += ` OFFSET ${Math.max(0, Math.trunc(this.offsetN))}`;
     return sql;
   }
 
@@ -345,14 +364,14 @@ class PgQuery implements PromiseLike<PostgrestResult> {
 
     if (this.headOnly) {
       const res = await this.exec.query(
-        `SELECT count(*)::int AS count FROM ${ident(this.table)}${where}`,
+        `SELECT count(*)::int AS count FROM ${qIdent(this.table)}${where}`,
         params,
       );
       return { data: null, error: null, count: res.rows[0]?.count ?? 0 };
     }
 
     const cols = this.selectColumns === '*' ? '*' : this.selectColumnList();
-    const sql = `SELECT ${cols} FROM ${ident(this.table)}${where}${this.orderLimitClause()}`;
+    const sql = `SELECT ${cols} FROM ${qIdent(this.table)}${where}${this.orderLimitClause()}`;
     const res = await this.exec.query(sql, params);
 
     let count: number | null = null;
@@ -360,7 +379,7 @@ class PgQuery implements PromiseLike<PostgrestResult> {
       const cParams: unknown[] = [];
       const cWhere = this.whereClause(cParams);
       const cRes = await this.exec.query(
-        `SELECT count(*)::int AS count FROM ${ident(this.table)}${cWhere}`,
+        `SELECT count(*)::int AS count FROM ${qIdent(this.table)}${cWhere}`,
         cParams,
       );
       count = cRes.rows[0]?.count ?? 0;
@@ -410,7 +429,7 @@ class PgQuery implements PromiseLike<PostgrestResult> {
       return `(${placeholders.join(', ')})`;
     });
 
-    let sql = `INSERT INTO ${ident(this.table)} (${columns.map(ident).join(', ')}) VALUES ${valueTuples.join(', ')}`;
+    let sql = `INSERT INTO ${qIdent(this.table)} (${columns.map(ident).join(', ')}) VALUES ${valueTuples.join(', ')}`;
 
     if (this.op === 'upsert') {
       if (this.conflictColumns.length > 0) {
@@ -448,7 +467,7 @@ class PgQuery implements PromiseLike<PostgrestResult> {
     if (sets.length === 0) return { data: this.returning ? [] : null, error: null, count: 0 };
 
     const where = this.whereClause(params);
-    let sql = `UPDATE ${ident(this.table)} SET ${sets.join(', ')}${where}`;
+    let sql = `UPDATE ${qIdent(this.table)} SET ${sets.join(', ')}${where}`;
     if (this.returning) sql += ` RETURNING ${this.returning === '*' ? '*' : this.returningList()}`;
 
     const res = await this.exec.query(sql, params);
@@ -459,7 +478,7 @@ class PgQuery implements PromiseLike<PostgrestResult> {
   private async runDelete(): Promise<PostgrestResult> {
     const params: unknown[] = [];
     const where = this.whereClause(params);
-    let sql = `DELETE FROM ${ident(this.table)}${where}`;
+    let sql = `DELETE FROM ${qIdent(this.table)}${where}`;
     if (this.returning) sql += ` RETURNING ${this.returning === '*' ? '*' : this.returningList()}`;
     const res = await this.exec.query(sql, params);
     if (!this.returning) return { data: null, error: null, count: res.rowCount };

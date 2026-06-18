@@ -1,105 +1,54 @@
 /**
- * POST /api/data-entry/queue/[id]/skip — Process a queued record immediately.
+ * POST /api/data-entry/queue/[id]/skip — "Process now" for a queued record.
  *
- * Runs the full data entry pipeline inline (same as Quick Run), then marks
- * the queue item as completed. No waiting for the cron tick.
+ * In the new model the revops-agents cron-driver drains runs.dispatch_queue;
+ * the UI never executes the pipeline. "Process now" simply re-queues the row
+ * (status='pending', attempts reset) with a fresh enqueued_at so the next
+ * drain picks it up immediately. Requires can_run_batches.
  */
 
-import { NextResponse } from 'next/server';
 import { createServiceClient } from '@/lib/supabase/server';
 import { getAuthContext } from '@/lib/auth';
-import { SalesforceTokenCache } from '@/lib/sf';
-import { runPipeline } from '@/lib/pipeline';
+import { AGENT_REF, jsonError } from '@/lib/revops/mappers';
 
 export const runtime = 'nodejs';
-export const maxDuration = 300;
-
-const tokenCache = new SalesforceTokenCache();
+export const dynamic = 'force-dynamic';
 
 export async function POST(
   _request: Request,
   { params }: { params: Promise<{ id: string }> },
 ) {
-  const ctx = await getAuthContext();
-  if (!ctx) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+  const { id } = await params;
 
-  const dePerms = ctx.permissions.modules.data_entry;
-  if (!dePerms.access || !dePerms.can_run_batches) {
-    return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
+  const ctx = await getAuthContext();
+  if (!ctx.permissions.modules.data_entry.access) {
+    return jsonError('Forbidden', 403, 'FORBIDDEN');
+  }
+  if (!ctx.permissions.modules.data_entry.can_run_batches) {
+    return jsonError('Forbidden', 403, 'FORBIDDEN');
   }
 
-  const { id } = await params;
   const supabase = createServiceClient();
 
-  // Load the queue item
-  const { data: item, error: fetchErr } = await supabase
-    .from('data_entry_queue')
-    .select('id, record_id, object_type, status, org_id')
+  // Re-queue the row for immediate pickup by the cron-driver's next drain.
+  const { data, error } = await supabase
+    .from('runs.dispatch_queue')
+    .update({
+      status: 'pending',
+      attempts: 0,
+      enqueued_at: new Date().toISOString(),
+    })
+    .eq('agent_ref', AGENT_REF)
     .eq('id', id)
-    .eq('org_id', ctx.orgId)
+    .select('id')
     .maybeSingle();
 
-  if (fetchErr || !item) {
-    return NextResponse.json({ error: 'Queue item not found' }, { status: 404 });
+  if (error) {
+    return jsonError(error.message, 500, 'UPDATE_FAILED');
+  }
+  if (!data) {
+    return jsonError('Queue item not found', 404, 'NOT_FOUND');
   }
 
-  if (item.status !== 'waiting') {
-    return NextResponse.json(
-      { error: `Cannot process — status is '${item.status}', expected 'waiting'` },
-      { status: 409 },
-    );
-  }
-
-  // Mark as processing
-  await supabase
-    .from('data_entry_queue')
-    .update({ status: 'processing' })
-    .eq('id', id);
-
-  try {
-    const result = await runPipeline({
-      input: {
-        recordId: item.record_id,
-        objectType: item.object_type as 'Lead' | 'Opportunity',
-        orgId: ctx.orgId,
-        userId: ctx.userId,
-        dryRun: false,
-      },
-      supabase,
-      tokenCache,
-      triggerType: 'webhook',
-    });
-
-    // Mark queue item completed
-    await supabase
-      .from('data_entry_queue')
-      .update({
-        status: 'completed',
-        run_id: result.runId,
-        attempts: 1,
-        processed_at: new Date().toISOString(),
-      })
-      .eq('id', id);
-
-    return NextResponse.json({
-      processed: true,
-      runId: result.runId,
-      fieldsWritten: result.fieldsWritten,
-      fieldsSkipped: result.fieldsSkipped,
-      fieldsErrored: result.fieldsErrored,
-    });
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-
-    await supabase
-      .from('data_entry_queue')
-      .update({
-        status: 'failed',
-        attempts: 1,
-        last_error: message,
-      })
-      .eq('id', id);
-
-    return NextResponse.json({ error: message }, { status: 500 });
-  }
+  return Response.json({ ok: true, id: String(data.id) });
 }

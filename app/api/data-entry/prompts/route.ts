@@ -1,133 +1,160 @@
 /**
  * GET  /api/data-entry/prompts — Active prompt + version history.
- * POST /api/data-entry/prompts — Create a new version; flips is_active.
- *        Body: { systemPrompt, userPromptPreamble?, name?, notes? }
- *        If activate=false, the new version is saved but doesn't become active.
+ * POST /api/data-entry/prompts — Create a new version; deactivates the prior
+ *        active version for both slots and inserts a new system/extraction pair.
+ *
+ * Backed by config.prompt_versions (two rows per version):
+ *   slot 'system'     ↔ system_prompt
+ *   slot 'extraction' ↔ user_prompt_preamble
+ * scoped by agent_ref = AGENT_REF.
  */
 
 import { NextResponse } from 'next/server';
 import { z } from 'zod';
-import { loadActivePromptRow } from '@/lib/pipeline';
 import { createServiceClient } from '@/lib/supabase/server';
 import { getAuthContext } from '@/lib/auth';
+import {
+  AGENT_REF,
+  jsonError,
+  mergePromptVersions,
+  type PromptSlotRow,
+} from '@/lib/revops/mappers';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
+const SLOT_COLUMNS = 'id, slot, version, body, is_active, notes, created_at';
+
 export async function GET() {
   const ctx = await getAuthContext();
-  if (!ctx) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
   if (!ctx.permissions.modules.data_entry.access) {
-    return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
+    return jsonError('Forbidden', 403, 'FORBIDDEN');
   }
+
   const supabase = createServiceClient();
 
-  // Ensure a seed exists
-  try {
-    await loadActivePromptRow(supabase, ctx.orgId);
-  } catch (err) {
-    return NextResponse.json(
-      { error: err instanceof Error ? err.message : 'Seed failed', code: 'SEED_FAILED' },
-      { status: 500 },
-    );
-  }
-
   const { data, error } = await supabase
-    .from('de_prompts')
-    .select('id, version, name, notes, system_prompt, user_prompt_preamble, is_active, created_at')
-    .eq('org_id', ctx.orgId)
-    .order('version', { ascending: false })
-    .limit(50);
+    .from('config.prompt_versions')
+    .select(SLOT_COLUMNS)
+    .eq('agent_ref', AGENT_REF)
+    .order('version', { ascending: false });
 
   if (error) {
-    return NextResponse.json({ error: error.message, code: 'QUERY_FAILED' }, { status: 500 });
+    return jsonError(error.message, 500, 'QUERY_FAILED');
   }
 
-  const rows = data ?? [];
-  const active = rows.find((r) => r.is_active) ?? null;
+  const rows = (data ?? []) as PromptSlotRow[];
+  const versions = mergePromptVersions(rows);
+  const active = versions.find((v) => v.is_active) ?? null;
 
   return NextResponse.json({
     active,
-    history: rows,
+    history: versions,
   });
 }
 
 const createSchema = z.object({
-  systemPrompt: z.string().min(50).max(20_000),
-  userPromptPreamble: z.string().max(5000).optional().default(''),
-  name: z.string().max(200).optional(),
+  // The live PromptEditor client sends camelCase; the task spec names them in
+  // snake_case. Accept both so neither contract breaks.
+  systemPrompt: z.string().min(50).max(20_000).optional(),
+  system_prompt: z.string().min(50).max(20_000).optional(),
+  userPromptPreamble: z.string().max(5000).optional(),
+  user_prompt_preamble: z.string().max(5000).optional(),
   notes: z.string().max(2000).optional(),
-  activate: z.boolean().optional().default(true),
 });
 
 export async function POST(request: Request) {
+  // Gate on capability, not identity presence (single-tenant editor has no email).
   const ctx = await getAuthContext();
-  if (!ctx) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
   if (!ctx.permissions.modules.data_entry.can_edit_prompts) {
-    return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
+    return jsonError('Forbidden', 403, 'FORBIDDEN');
   }
 
   let body: unknown;
   try {
     body = await request.json();
   } catch {
-    return NextResponse.json({ error: 'Invalid JSON body', code: 'INVALID_REQUEST' }, { status: 400 });
+    return jsonError('Invalid JSON body', 400, 'INVALID_REQUEST');
   }
 
   const parsed = createSchema.safeParse(body);
   if (!parsed.success) {
-    return NextResponse.json({ error: parsed.error.message, code: 'INVALID_REQUEST' }, { status: 400 });
+    return jsonError(parsed.error.message, 400, 'INVALID_REQUEST');
+  }
+
+  const systemPrompt = parsed.data.systemPrompt ?? parsed.data.system_prompt;
+  const userPromptPreamble =
+    parsed.data.userPromptPreamble ?? parsed.data.user_prompt_preamble ?? '';
+  const notes = parsed.data.notes ?? null;
+
+  if (!systemPrompt) {
+    return jsonError('systemPrompt is required (50–20000 chars)', 400, 'INVALID_REQUEST');
   }
 
   const supabase = createServiceClient();
-  const input = parsed.data;
 
-  // Compute next version: max(version) + 1 for this org
+  // Compute next version: max(version) + 1 across both slots for this agent.
   const { data: maxRow, error: maxErr } = await supabase
-    .from('de_prompts')
+    .from('config.prompt_versions')
     .select('version')
-    .eq('org_id', ctx.orgId)
+    .eq('agent_ref', AGENT_REF)
     .order('version', { ascending: false })
     .limit(1)
     .maybeSingle();
 
   if (maxErr) {
-    return NextResponse.json({ error: maxErr.message, code: 'QUERY_FAILED' }, { status: 500 });
+    return jsonError(maxErr.message, 500, 'QUERY_FAILED');
   }
 
   const nextVersion = ((maxRow?.version as number | undefined) ?? 0) + 1;
 
-  if (input.activate) {
-    // Deactivate all existing active versions first
-    const { error: deactErr } = await supabase
-      .from('de_prompts')
-      .update({ is_active: false })
-      .eq('org_id', ctx.orgId)
-      .eq('is_active', true);
+  // Deactivate currently-active rows for BOTH slots, then insert the new active
+  // pair. The partial-unique "one active per (agent_ref, slot)" index requires
+  // deactivate-before-insert (a single statement can't flip + insert without a
+  // transient duplicate). The only failure window — a crash between the two —
+  // leaves zero active rows, which DEGRADES SAFELY: the runtime falls back to
+  // the agent.md prompt body, and re-saving from the UI restores an active row.
+  const { error: deactErr } = await supabase
+    .from('config.prompt_versions')
+    .update({ is_active: false })
+    .eq('agent_ref', AGENT_REF)
+    .eq('is_active', true);
 
-    if (deactErr) {
-      return NextResponse.json({ error: deactErr.message, code: 'DEACTIVATE_FAILED' }, { status: 500 });
-    }
+  if (deactErr) {
+    return jsonError(deactErr.message, 500, 'DEACTIVATE_FAILED');
   }
 
-  const { data, error } = await supabase
-    .from('de_prompts')
-    .insert({
-      org_id: ctx.orgId,
-      user_id: ctx.userId,
-      version: nextVersion,
-      name: input.name ?? null,
-      notes: input.notes ?? null,
-      system_prompt: input.systemPrompt,
-      user_prompt_preamble: input.userPromptPreamble,
-      is_active: input.activate,
-    })
-    .select()
-    .single();
+  // Insert the new system + extraction pair, both active.
+  const { data: inserted, error: insertErr } = await supabase
+    .from('config.prompt_versions')
+    .insert([
+      {
+        agent_ref: AGENT_REF,
+        slot: 'system',
+        version: nextVersion,
+        body: systemPrompt,
+        is_active: true,
+        notes,
+        created_by: ctx.email ?? 'ui',
+      },
+      {
+        agent_ref: AGENT_REF,
+        slot: 'extraction',
+        version: nextVersion,
+        body: userPromptPreamble,
+        is_active: true,
+        notes,
+        created_by: ctx.email ?? 'ui',
+      },
+    ])
+    .select(SLOT_COLUMNS);
 
-  if (error) {
-    return NextResponse.json({ error: error.message, code: 'CREATE_FAILED' }, { status: 500 });
+  if (insertErr) {
+    return jsonError(insertErr.message, 500, 'CREATE_FAILED');
   }
 
-  return NextResponse.json({ prompt: data }, { status: 201 });
+  const newRows = (inserted ?? []) as PromptSlotRow[];
+  const [prompt] = mergePromptVersions(newRows);
+
+  return NextResponse.json({ prompt }, { status: 201 });
 }

@@ -1,4 +1,36 @@
-# Data Entry Agent
+# Data Entry Agent — control panel
+
+> ## ⚠️ Architecture (2026-06): revops-backed control panel
+>
+> This app is now a **thin control panel** over the **revops-agents** platform. It
+> **no longer runs the extraction pipeline** or holds Salesforce / Gong / Outreach /
+> OpenAI credentials, and it **does not own a database**. The agent itself
+> (`sales/data-entry-agent`), the extraction + write-back tools, and the schema all
+> live in revops-agents; this UI reaches **revops-db** only through the
+> `/db/{database}/sql` endpoint as the least-privilege `data_entry_agent` Postgres
+> role. Triggering a run **enqueues** a row (`runs.dispatch_queue`) that the
+> revops-agents cron-driver dispatches — the UI executes nothing.
+>
+> - **What this app does:** manage versioned prompts (system + extraction slots),
+>   field config / visibility, view runs + per-field extraction detail (incl. an
+>   FLS silent-drop verification panel) + analytics, and trigger per-record /
+>   batch (record-id list) runs + reruns.
+> - **Setup:** see [`.env.example`](.env.example) (`REVOPS_SQL_ENDPOINT`,
+>   `REVOPS_DB_BEARER`, role/gate vars), the schema mapping in
+>   [`docs/REVOPS-BACKEND-MAPPING.md`](docs/REVOPS-BACKEND-MAPPING.md), and the
+>   go-live runbook in the revops-agents repo
+>   (`agents/sales/data-entry-agent/GO-LIVE.md`).
+> - **Access:** secure-by-default. The DeployBay ingress grant (or
+>   `APP_ACCESS_PASSWORD`) is the outer gate; roles resolve to **viewer**
+>   (read-only) unless an editor is granted via `REVOPS_DEFAULT_ROLE=editor`
+>   (single-tenant) or a trusted-identity allowlist (multi-user).
+>
+> The sections below describe the original self-contained pipeline (pre-port) and
+> are retained for historical reference; the in-process pipeline + credential env
+> vars they mention no longer apply in revops-backed mode.
+
+<details>
+<summary>Legacy (pre-port) documentation</summary>
 
 An AI agent that reads a Salesforce **Lead** or **Opportunity** (plus its related
 Gong calls and Outreach activity), extracts structured field values with an LLM,
@@ -176,3 +208,5 @@ scripts/
   outreach-oauth.ts  One-time helper to obtain an Outreach refresh token
 supabase/migrations/ Database schema
 ```
+
+</details>

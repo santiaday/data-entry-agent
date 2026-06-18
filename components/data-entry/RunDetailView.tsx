@@ -67,12 +67,14 @@ export default function RunDetailView({
           >
             All runs for this record
           </Link>
-          <Link
-            href={`/data-entry/batches/${run.batch_id}`}
-            className="text-blue-600 hover:underline"
-          >
-            View Batch
-          </Link>
+          {run.batch_id ? (
+            <Link
+              href={`/data-entry/batches/${run.batch_id}`}
+              className="text-blue-600 hover:underline"
+            >
+              View Batch
+            </Link>
+          ) : null}
         </div>
       </div>
 
