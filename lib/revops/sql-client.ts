@@ -24,7 +24,7 @@ export interface RemoteQueryResult {
 
 export interface RemoteSqlConfig {
   endpoint: string;   // e.g. https://1r7hjb5jv6.execute-api.us-east-1.amazonaws.com/prod
-  database: string;   // e.g. revops_agent_platform
+  database: string;   // endpoint registry KEY, e.g. agent_platform (not the raw db name)
   identity: string;   // e.g. data_entry_agent
   bearer: string;     // per-identity secret
   maxRows?: number;
