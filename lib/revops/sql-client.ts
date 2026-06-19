@@ -24,7 +24,7 @@ export interface RemoteQueryResult {
 
 export interface RemoteSqlConfig {
   endpoint: string;   // e.g. https://1r7hjb5jv6.execute-api.us-east-1.amazonaws.com/prod
-  database: string;   // e.g. revops_agent_platform
+  database: string;   // endpoint registry KEY, e.g. agent_platform (not the raw db name)
   identity: string;   // e.g. data_entry_agent
   bearer: string;     // per-identity secret
   maxRows?: number;
@@ -40,7 +40,10 @@ export class RemoteSqlError extends Error {
 
 export function resolveRemoteSqlConfig(): RemoteSqlConfig {
   const endpoint = process.env.REVOPS_SQL_ENDPOINT;
-  const database = process.env.REVOPS_DB_NAME ?? "revops_agent_platform";
+  // This is the SQL endpoint's REGISTRY KEY (services/webhooks query-registry),
+  // NOT the Postgres database name. The agent-platform DB (revops_agent_platform)
+  // is keyed as "agent_platform"; using the raw db name 404s `unknown_database`.
+  const database = process.env.REVOPS_DB_NAME ?? "agent_platform";
   const identity = process.env.REVOPS_DB_IDENTITY ?? "data_entry_agent";
   const bearer = process.env.REVOPS_DB_BEARER;
   if (!endpoint) throw new RemoteSqlError("REVOPS_SQL_ENDPOINT is not set");
