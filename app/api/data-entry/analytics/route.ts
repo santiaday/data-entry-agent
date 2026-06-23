@@ -15,7 +15,8 @@
 import { NextResponse } from 'next/server';
 import { getAuthContext } from '@/lib/auth';
 import { AGENT_REF, jsonError, confidenceToNumber } from '@/lib/revops/mappers';
-import { revopsQuery } from '@/lib/revops/sql-client';
+import { revopsQuery, RemoteSqlError } from '@/lib/revops/sql-client';
+import { withRevops } from '@/lib/revops/with-revops';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -50,9 +51,8 @@ type ConfidenceRow = { confidence: string | null; count: string | number };
 const toNum = (v: string | number | null | undefined): number =>
   typeof v === 'number' ? v : v == null ? 0 : Number(v) || 0;
 
-export async function GET(request: Request) {
+export const GET = withRevops(async (request: Request) => {
   const ctx = await getAuthContext();
-  if (!ctx) return jsonError('Unauthorized', 401, 'UNAUTHORIZED');
   if (!ctx.permissions.modules.data_entry.can_view_analytics) {
     return jsonError('Forbidden', 403, 'FORBIDDEN');
   }
@@ -248,7 +248,11 @@ export async function GET(request: Request) {
       confidenceDistribution,
     });
   } catch (err) {
-    const message = err instanceof Error ? err.message : 'Analytics query failed';
-    return jsonError(message, 500, 'QUERY_FAILED');
+    // Backend-availability errors (missing REVOPS env / unreachable endpoint)
+    // bubble to withRevops, which renders a structured 503. Genuine query
+    // failures are logged and surfaced as a sanitized 500.
+    if (err instanceof RemoteSqlError) throw err;
+    console.error('[analytics GET] aggregation error:', err);
+    return jsonError('Analytics query failed', 500, 'QUERY_FAILED');
   }
-}
+});

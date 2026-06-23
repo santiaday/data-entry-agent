@@ -3,7 +3,10 @@ import './globals.css';
 import { AuthProvider } from '@/lib/hooks/use-auth';
 
 export const metadata: Metadata = {
-  title: 'Data Entry Agent',
+  title: {
+    default: 'Data Entry Agent',
+    template: '%s · Data Entry Agent',
+  },
   description: 'AI-powered Salesforce field extraction and write-back agent.',
 };
 

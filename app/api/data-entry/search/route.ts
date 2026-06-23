@@ -10,14 +10,15 @@ import { NextResponse } from 'next/server';
 import { createServiceClient } from '@/lib/supabase/server';
 import { getAuthContext } from '@/lib/auth';
 import { AGENT_REF, jsonError, mapRun } from '@/lib/revops/mappers';
+import { withRevops } from '@/lib/revops/with-revops';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
-export async function GET(request: Request) {
+export const GET = withRevops(async (request: Request) => {
   const ctx = await getAuthContext();
   if (!ctx.permissions.modules.data_entry.access) {
-    return jsonError('Forbidden', 403);
+    return jsonError('Forbidden', 403, 'FORBIDDEN');
   }
 
   const { searchParams } = new URL(request.url);
@@ -40,10 +41,11 @@ export async function GET(request: Request) {
     .limit(100);
 
   if (error) {
-    return jsonError(error.message, 500, 'QUERY_FAILED');
+    console.error('[search GET] query error:', error.code, error.message);
+    return jsonError('Failed to search runs', 500, 'QUERY_FAILED');
   }
 
   const runs = (data ?? []).map((row) => mapRun(row));
 
   return NextResponse.json({ runs });
-}
+});

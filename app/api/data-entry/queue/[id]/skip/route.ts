@@ -10,14 +10,15 @@
 import { createServiceClient } from '@/lib/supabase/server';
 import { getAuthContext } from '@/lib/auth';
 import { AGENT_REF, jsonError } from '@/lib/revops/mappers';
+import { withRevops, mapDbWriteError } from '@/lib/revops/with-revops';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
-export async function POST(
+export const POST = withRevops(async (
   _request: Request,
   { params }: { params: Promise<{ id: string }> },
-) {
+) => {
   const { id } = await params;
 
   const ctx = await getAuthContext();
@@ -44,11 +45,16 @@ export async function POST(
     .maybeSingle();
 
   if (error) {
-    return jsonError(error.message, 500, 'UPDATE_FAILED');
+    return mapDbWriteError(
+      error,
+      'That queue item already exists',
+      'Failed to re-queue the item',
+      'UPDATE_FAILED',
+    );
   }
   if (!data) {
     return jsonError('Queue item not found', 404, 'NOT_FOUND');
   }
 
   return Response.json({ ok: true, id: String(data.id) });
-}
+});

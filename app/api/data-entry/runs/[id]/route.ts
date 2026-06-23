@@ -11,17 +11,17 @@ import { NextResponse } from 'next/server';
 import { createServiceClient } from '@/lib/supabase/server';
 import { getAuthContext } from '@/lib/auth';
 import { AGENT_REF, jsonError, mapRun, mapExtraction, extractionCounts } from '@/lib/revops/mappers';
+import { withRevops } from '@/lib/revops/with-revops';
 
 export const runtime = 'nodejs';
 
-export async function GET(
+export const GET = withRevops(async (
   _request: Request,
   { params }: { params: Promise<{ id: string }> },
-) {
+) => {
   const { id } = await params;
 
   const ctx = await getAuthContext();
-  if (!ctx) return jsonError('Unauthorized', 401, 'UNAUTHORIZED');
   if (!ctx.permissions.modules.data_entry.access) {
     return jsonError('Forbidden', 403, 'FORBIDDEN');
   }
@@ -44,7 +44,8 @@ export async function GET(
   ]);
 
   if (runRes.error) {
-    return jsonError(runRes.error.message, 500, 'QUERY_FAILED');
+    console.error('[runs/[id] GET] run query error:', runRes.error.code, runRes.error.message);
+    return jsonError('Failed to load the run', 500, 'QUERY_FAILED');
   }
 
   if (!runRes.data) {
@@ -52,7 +53,8 @@ export async function GET(
   }
 
   if (extractionsRes.error) {
-    return jsonError(extractionsRes.error.message, 500, 'QUERY_FAILED');
+    console.error('[runs/[id] GET] extractions query error:', extractionsRes.error.code, extractionsRes.error.message);
+    return jsonError('Failed to load run extractions', 500, 'QUERY_FAILED');
   }
 
   const extractionRows = (extractionsRes.data ?? []) as Record<string, unknown>[];
@@ -94,4 +96,4 @@ export async function GET(
     extractions,
     batchSummary,
   });
-}
+});

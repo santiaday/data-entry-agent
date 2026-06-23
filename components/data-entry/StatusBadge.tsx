@@ -1,7 +1,9 @@
 'use client';
 
 const STATUS_STYLES: Record<string, string> = {
-  pending: 'bg-gray-100 text-gray-800',
+  pending: 'bg-amber-100 text-amber-800',
+  dispatching: 'bg-blue-100 text-blue-800',
+  dispatched: 'bg-green-100 text-green-800',
   running: 'bg-blue-100 text-blue-800',
   completed: 'bg-green-100 text-green-800',
   failed: 'bg-red-100 text-red-800',
@@ -12,13 +14,15 @@ const STATUS_STYLES: Record<string, string> = {
 
 export function StatusBadge({ status }: { status: string }) {
   const style = STATUS_STYLES[status] ?? 'bg-gray-100 text-gray-800';
+  const bluePulse = status === 'running' || status === 'processing' || status === 'dispatching';
+  const amberPulse = status === 'waiting' || status === 'pending';
   return (
     <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ${style}`}>
-      {status === 'running' && (
-        <span className="mr-1 h-1.5 w-1.5 animate-pulse rounded-full bg-blue-600" />
+      {bluePulse && (
+        <span aria-hidden="true" className="mr-1 h-1.5 w-1.5 animate-pulse rounded-full bg-blue-600" />
       )}
-      {(status === 'waiting' || status === 'processing') && (
-        <span className="mr-1 h-1.5 w-1.5 animate-pulse rounded-full bg-amber-600" />
+      {amberPulse && (
+        <span aria-hidden="true" className="mr-1 h-1.5 w-1.5 animate-pulse rounded-full bg-amber-600" />
       )}
       {status}
     </span>

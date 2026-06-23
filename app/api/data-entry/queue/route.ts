@@ -6,10 +6,11 @@ import { NextResponse } from 'next/server';
 import { createServiceClient } from '@/lib/supabase/server';
 import { getAuthContext } from '@/lib/auth';
 import { AGENT_REF, jsonError, mapQueue } from '@/lib/revops/mappers';
+import { withRevops } from '@/lib/revops/with-revops';
 
 export const runtime = 'nodejs';
 
-export async function GET(request: Request) {
+export const GET = withRevops(async (request: Request) => {
   const ctx = await getAuthContext();
   if (!ctx.permissions.modules.data_entry.access) {
     return jsonError('Forbidden', 403, 'FORBIDDEN');
@@ -41,8 +42,9 @@ export async function GET(request: Request) {
   const { data, error } = await query;
 
   if (error) {
-    return jsonError(error.message, 500, 'QUERY_FAILED');
+    console.error('[queue GET] query error:', error.code, error.message);
+    return jsonError('Failed to load the dispatch queue', 500, 'QUERY_FAILED');
   }
 
   return NextResponse.json({ queue: (data ?? []).map(mapQueue) });
-}
+});

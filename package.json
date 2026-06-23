@@ -11,12 +11,7 @@
     "build": "next build",
     "start": "next start",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run",
-    "migrate": "tsx scripts/migrate.ts",
-    "sync": "tsx scripts/sync-from-supabase.ts",
-    "export-data": "tsx scripts/export-data.ts",
-    "backfill": "tsx scripts/backfill.ts",
-    "oauth:outreach": "tsx scripts/outreach-oauth.ts"
+    "test": "vitest run"
   },
   "dependencies": {
     "@supabase/supabase-js": "2.49.1",
@@ -24,8 +19,6 @@
     "dotenv": "^16.4.7",
     "jsonwebtoken": "^9.0.2",
     "next": "^15.1.0",
-    "openai": "^4.85.0",
-    "pg": "^8.13.1",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "tailwind-merge": "^2.6.0",
@@ -34,7 +27,6 @@
   "devDependencies": {
     "@types/jsonwebtoken": "^9.0.7",
     "@types/node": "^22.0.0",
-    "@types/pg": "^8.11.10",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
     "autoprefixer": "^10.4.20",

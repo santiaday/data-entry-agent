@@ -11,37 +11,33 @@
 import { getAuthContext } from '@/lib/auth';
 import { AGENT_REF, jsonError } from '@/lib/revops/mappers';
 import { revopsQuery } from '@/lib/revops/sql-client';
+import { withRevops } from '@/lib/revops/with-revops';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
-export async function POST() {
+export const POST = withRevops(async () => {
   const ctx = await getAuthContext();
-  if (!ctx) return jsonError('Unauthorized', 401);
-
   const dePerms = ctx.permissions.modules.data_entry;
   if (!dePerms.access || !dePerms.can_run_batches) {
-    return jsonError('Forbidden', 403);
+    return jsonError('Forbidden', 403, 'FORBIDDEN');
   }
 
-  let requeued = 0;
-  try {
-    const rows = await revopsQuery<{ id: string }>(
-      `UPDATE runs.dispatch_queue
-          SET enqueued_at = now()
-        WHERE agent_ref = $1
-          AND status = 'pending'
-      RETURNING id`,
-      [AGENT_REF],
-    );
-    requeued = rows.length;
-  } catch {
-    return jsonError('Failed to re-queue pending rows', 500);
-  }
+  // A throw here (missing REVOPS env / unreachable endpoint) propagates to
+  // withRevops, which renders a structured 503 the UI can show.
+  const rows = await revopsQuery<{ id: string }>(
+    `UPDATE runs.dispatch_queue
+        SET enqueued_at = now()
+      WHERE agent_ref = $1
+        AND status = 'pending'
+    RETURNING id`,
+    [AGENT_REF],
+  );
+  const requeued = rows.length;
 
   return Response.json({
     ok: true,
     note: 'Queue is drained automatically by revops-agents; rows will dispatch shortly.',
     requeued,
   });
-}
+});

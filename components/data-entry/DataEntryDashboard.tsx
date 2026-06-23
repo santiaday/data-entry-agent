@@ -3,8 +3,9 @@
 import { useEffect, useState, useCallback } from 'react';
 import Link from 'next/link';
 import { StatusBadge, DryRunBadge } from './StatusBadge';
-import { BatchFieldSelector } from './BatchFieldSelector';
-import type { BatchListItem, QueueItem, HistoryRow, StreamEvent } from './types';
+import type { BatchListItem, QueueItem, HistoryRow } from './types';
+
+const TRIGGER_FILTERS = ['all', 'manual', 'webhook'] as const;
 
 export default function DataEntryDashboard() {
   // ── Quick Run form ────────────────────────────────────
@@ -13,27 +14,18 @@ export default function DataEntryDashboard() {
   const [dryRun, setDryRun] = useState(false);
   const [running, setRunning] = useState(false);
   const [runStatus, setRunStatus] = useState<string | null>(null);
-  const [runPhase, setRunPhase] = useState<string | null>(null);
-
-  // ── Batch form ────────────────────────────────────────
-  const [soqlQuery, setSoqlQuery] = useState('');
-  const [batchDryRun, setBatchDryRun] = useState(false);
-  const [batchObjectType, setBatchObjectType] = useState<'Lead' | 'Opportunity'>('Lead');
-  const [batchRunning, setBatchRunning] = useState(false);
-  const [batchError, setBatchError] = useState<string | null>(null);
-  // Field scope: all fields, or a specific subset (by SF field API name).
-  const [batchScopeAll, setBatchScopeAll] = useState(true);
-  const [batchSelectedFields, setBatchSelectedFields] = useState<string[]>([]);
 
   // ── History ───────────────────────────────────────────
   const [batches, setBatches] = useState<BatchListItem[]>([]);
   const [queueItems, setQueueItems] = useState<QueueItem[]>([]);
   const [typeFilter, setTypeFilter] = useState<string>('all');
   const [loadingHistory, setLoadingHistory] = useState(true);
+  const [historyError, setHistoryError] = useState<string | null>(null);
 
   const loadHistory = useCallback((filter?: string) => {
     const activeFilter = filter ?? typeFilter;
     setLoadingHistory(true);
+    setHistoryError(null);
 
     const batchParams = new URLSearchParams({ limit: '100' });
     if (activeFilter !== 'all' && activeFilter !== 'webhook') {
@@ -41,24 +33,31 @@ export default function DataEntryDashboard() {
     }
 
     Promise.all([
-      fetch(`/api/data-entry/batches?${batchParams}`).then((r) => r.json()),
-      fetch('/api/data-entry/queue?limit=100').then((r) => r.json()),
+      fetch(`/api/data-entry/batches?${batchParams}`),
+      fetch('/api/data-entry/queue?limit=100'),
     ])
-      .then(([batchData, queueData]) => {
+      .then(async ([batchRes, queueRes]) => {
+        if (!batchRes.ok || !queueRes.ok) {
+          const failed = !batchRes.ok ? batchRes : queueRes;
+          const body = await failed.json().catch(() => ({}));
+          throw new Error(body.error ?? `Request failed (${failed.status})`);
+        }
+        const [batchData, queueData] = await Promise.all([batchRes.json(), queueRes.json()]);
         setBatches(batchData.batches ?? []);
         setQueueItems(queueData.queue ?? []);
       })
-      .catch(() => {})
+      .catch((e) => setHistoryError(e instanceof Error ? e.message : 'Failed to load run history'))
       .finally(() => setLoadingHistory(false));
   }, [typeFilter]);
 
   // Load once on mount
   useEffect(() => { loadHistory(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Only show queue items that are still pending — once processed, the
-  // pipeline's batch row is the canonical entry in the history.
+  // Only show queue items that are still in-flight — once dispatched/failed the
+  // agent_run becomes the canonical history row. 'pending' = ready/active,
+  // 'dispatching' = the cron-driver has it in hand.
   const activeQueueItems = queueItems.filter(
-    (q) => q.status === 'waiting' || q.status === 'processing',
+    (q) => q.status === 'pending' || q.status === 'dispatching',
   );
 
   const historyRows: HistoryRow[] = (() => {
@@ -74,51 +73,37 @@ export default function DataEntryDashboard() {
   const filteredRows = typeFilter === 'all'
     ? historyRows
     : typeFilter === 'webhook'
-      ? historyRows.filter((r) => r.kind === 'queued' || (r.kind === 'batch' && r.data.trigger_type === 'webhook'))
+      ? historyRows.filter(
+          (r) =>
+            (r.kind === 'queued' && r.data.trigger_event === 'webhook') ||
+            (r.kind === 'batch' && r.data.trigger_type === 'webhook'),
+        )
       : historyRows.filter((r) => r.kind === 'batch' && r.data.trigger_type === typeFilter);
 
   const [processingQueueId, setProcessingQueueId] = useState<string | null>(null);
+  const [processedQueueId, setProcessedQueueId] = useState<string | null>(null);
   const [processingAll, setProcessingAll] = useState(false);
   const [processAllStatus, setProcessAllStatus] = useState<string | null>(null);
 
+  // Ready = pending and its scheduled time has arrived.
   const readyCount = activeQueueItems.filter(
-    (q) => q.status === 'waiting' && new Date(q.scheduled_at).getTime() <= Date.now(),
+    (q) => q.status === 'pending' && new Date(q.scheduled_at).getTime() <= Date.now(),
   ).length;
 
   async function handleProcessAllReady() {
     setProcessingAll(true);
-    setProcessAllStatus('Starting...');
-    let totalProcessed = 0;
-    let totalFailed = 0;
-
+    setProcessAllStatus(null);
     try {
-      // Keep calling until no more ready jobs
-      while (true) {
-        const res = await fetch('/api/data-entry/queue/process-ready', { method: 'POST' });
-        const data = await res.json();
-
-        if (!res.ok) {
-          setProcessAllStatus(`Error: ${data.error}`);
-          break;
-        }
-
-        totalProcessed += data.succeeded;
-        totalFailed += data.failed;
-
-        if (data.processed === 0 || data.remaining === 0) {
-          setProcessAllStatus(
-            `Done: ${totalProcessed} processed${totalFailed > 0 ? `, ${totalFailed} failed` : ''}`,
-          );
-          break;
-        }
-
-        setProcessAllStatus(
-          `Processing... ${totalProcessed} done, ${data.remaining} remaining`,
-        );
-        loadHistory();
+      const res = await fetch('/api/data-entry/queue/process-ready', { method: 'POST' });
+      const data = await res.json();
+      if (!res.ok) {
+        setProcessAllStatus(`Error: ${data.error ?? 'Request failed'}`);
+        return;
       }
+      const n = data.requeued ?? 0;
+      setProcessAllStatus(`Re-queued ${n} pending; the cron-driver will dispatch shortly.`);
     } catch (err) {
-      setProcessAllStatus(`Error: ${err instanceof Error ? err.message : 'Unknown'}`);
+      setProcessAllStatus(`Error: ${err instanceof Error ? err.message : 'Unknown error'}`);
     } finally {
       setProcessingAll(false);
       loadHistory();
@@ -129,16 +114,18 @@ export default function DataEntryDashboard() {
     setProcessingQueueId(queueId);
     try {
       const res = await fetch(`/api/data-entry/queue/${queueId}/skip`, { method: 'POST' });
-      const data = await res.json();
-      if (data.runId) {
-        window.location.href = `/data-entry/runs/${data.runId}`;
-      } else {
-        loadHistory();
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setProcessAllStatus(`Error: ${data.error ?? 'Re-queue failed'}`);
+        return;
       }
-    } catch {
-      loadHistory();
+      setProcessedQueueId(queueId);
+      setTimeout(() => setProcessedQueueId(null), 4000);
+    } catch (err) {
+      setProcessAllStatus(`Error: ${err instanceof Error ? err.message : 'Unknown error'}`);
     } finally {
       setProcessingQueueId(null);
+      loadHistory();
     }
   }
 
@@ -152,7 +139,6 @@ export default function DataEntryDashboard() {
     if (!recordId.trim()) return;
     setRunning(true);
     setRunStatus(null);
-    setRunPhase(null);
 
     try {
       const response = await fetch('/api/data-entry/run', {
@@ -161,117 +147,56 @@ export default function DataEntryDashboard() {
         body: JSON.stringify({ recordId: recordId.trim(), objectType, dryRun }),
       });
 
+      const data = await response.json().catch(() => ({}));
       if (!response.ok) {
-        const err = await response.json();
-        setRunStatus(`Error: ${err.error}`);
-        setRunning(false);
+        setRunStatus(`Error: ${data.error ?? 'Request failed'}`);
         return;
       }
 
-      const reader = response.body?.getReader();
-      if (!reader) return;
-
-      const decoder = new TextDecoder();
-      let buffer = '';
-      let resultRunId: string | null = null;
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split('\n\n');
-        buffer = lines.pop() ?? '';
-
-        for (const line of lines) {
-          if (!line.startsWith('data: ')) continue;
-          try {
-            const event = JSON.parse(line.slice(6)) as StreamEvent;
-            if (event.type === 'phase') {
-              setRunPhase(`${event.phase}: ${event.status}`);
-            } else if (event.type === 'done') {
-              resultRunId = event.runId;
-              setRunStatus(`Done: ${event.summary.extracted} extracted, ${event.summary.written} written, ${event.summary.skipped} skipped`);
-            } else if (event.type === 'error') {
-              setRunStatus(`Error: ${event.error}`);
-            }
-          } catch { /* skip malformed events */ }
-        }
-      }
-
-      setRunning(false);
+      setRunStatus(`Queued — the agent will process it shortly (dry_run=${data.dry_run ?? dryRun}).`);
       loadHistory();
-
-      if (resultRunId) {
-        setTimeout(() => {
-          window.location.href = `/data-entry/runs/${resultRunId}`;
-        }, 1500);
-      }
     } catch (err) {
       setRunStatus(`Error: ${err instanceof Error ? err.message : 'Unknown error'}`);
-      setRunning(false);
-    }
-  }
-
-  // ── Batch handler ─────────────────────────────────────
-  async function handleBatchRun() {
-    if (!soqlQuery.trim()) return;
-    setBatchRunning(true);
-    setBatchError(null);
-
-    const fieldNames = batchScopeAll ? undefined : batchSelectedFields;
-
-    try {
-      const response = await fetch('/api/data-entry/batch', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          soqlQuery: soqlQuery.trim(),
-          objectType: batchObjectType,
-          dryRun: batchDryRun,
-          ...(fieldNames && fieldNames.length > 0 ? { fieldNames } : {}),
-        }),
-      });
-
-      const data = await response.json();
-      if (!response.ok) {
-        setBatchError(data.error);
-      } else {
-        loadHistory();
-        setSoqlQuery('');
-      }
-    } catch (err) {
-      setBatchError(err instanceof Error ? err.message : 'Unknown error');
     } finally {
-      setBatchRunning(false);
+      setRunning(false);
     }
   }
 
   return (
     <div className="space-y-8">
+      {/* ── Page header ────────────────────────────────── */}
+      <div>
+        <h1 className="text-2xl font-semibold">Dashboard</h1>
+        <p className="mt-1 text-sm text-muted-foreground">
+          Trigger runs and monitor recent activity.
+        </p>
+      </div>
+
       {/* ── Quick Run ──────────────────────────────────── */}
       <section className="rounded-xl border bg-card p-6">
         <h2 className="text-lg font-semibold">Quick Run</h2>
-        <p className="mt-1 text-sm text-muted-foreground">Run the agent for a single Lead or Opportunity</p>
+        <p className="mt-1 text-sm text-muted-foreground">Queue the agent for a single Lead or Opportunity. The cron-driver dispatches it shortly after.</p>
 
         <div className="mt-4 flex flex-wrap items-end gap-3">
           <div className="flex-1 min-w-[200px]">
-            <label className="block text-xs font-medium text-muted-foreground mb-1">Record ID</label>
+            <label htmlFor="quick-run-record-id" className="block text-xs font-medium text-muted-foreground mb-1">Record ID</label>
             <input
+              id="quick-run-record-id"
               type="text"
               value={recordId}
               onChange={(e) => setRecordId(e.target.value)}
               placeholder="00Q1234567890AB"
-              className="w-full rounded-lg border bg-background px-3 py-2 text-sm transition focus:outline-none focus:ring-2 focus:ring-emerald-200"
+              className="w-full rounded-lg border bg-background px-3 py-2 text-sm transition focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-200"
               disabled={running}
             />
           </div>
           <div>
-            <label className="block text-xs font-medium text-muted-foreground mb-1">Object</label>
+            <label htmlFor="quick-run-object" className="block text-xs font-medium text-muted-foreground mb-1">Object</label>
             <select
+              id="quick-run-object"
               value={objectType}
               onChange={(e) => setObjectType(e.target.value as 'Lead' | 'Opportunity')}
-              className="rounded-lg border bg-background px-3 py-2 text-sm transition focus:outline-none focus:ring-2 focus:ring-emerald-200"
+              className="rounded-lg border bg-background px-3 py-2 text-sm transition focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-200"
               disabled={running}
             >
               <option value="Lead">Lead</option>
@@ -279,99 +204,23 @@ export default function DataEntryDashboard() {
             </select>
           </div>
           <div>
-            <label className="block text-xs font-medium text-muted-foreground mb-1">Mode</label>
+            <span className="block text-xs font-medium text-muted-foreground mb-1">Mode</span>
             <ModeToggle active={dryRun} onChange={setDryRun} disabled={running} />
           </div>
           <button
             onClick={handleQuickRun}
             disabled={running || !recordId.trim()}
             type="button"
-            className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-700 disabled:opacity-50 transition"
+            className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-700 disabled:opacity-50 transition focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-200"
           >
-            {running ? 'Running...' : 'Run'}
+            {running ? 'Queuing...' : 'Run'}
           </button>
         </div>
 
-        {runPhase && running && (
-          <p className="mt-3 text-sm text-muted-foreground animate-pulse">{runPhase}</p>
-        )}
         {runStatus && (
-          <p className={`mt-3 text-sm ${runStatus.startsWith('Error') ? 'text-destructive' : 'text-green-700'}`}>
+          <p className={`mt-3 text-sm ${runStatus.startsWith('Error') ? 'text-destructive' : 'text-emerald-700'}`}>
             {runStatus}
           </p>
-        )}
-      </section>
-
-      {/* ── Batch Run ─────────────────────────────────── */}
-      <section className="rounded-xl border bg-card p-6">
-        <h2 className="text-lg font-semibold">Batch Run</h2>
-        <p className="mt-1 text-sm text-muted-foreground">Run against multiple records via SOQL query. Scope to specific fields to cut cost on targeted backfills.</p>
-
-        <div className="mt-4 space-y-3">
-          <div>
-            <label className="block text-xs font-medium text-muted-foreground mb-1">SOQL Query</label>
-            <textarea
-              value={soqlQuery}
-              onChange={(e) => setSoqlQuery(e.target.value)}
-              placeholder="SELECT Id FROM Lead WHERE Status = 'Demo Completed' AND AI_Buyer_Persona__c = null LIMIT 5"
-              rows={2}
-              className="w-full rounded-lg border bg-background px-3 py-2 text-sm font-mono transition focus:outline-none focus:ring-2 focus:ring-emerald-200"
-              disabled={batchRunning}
-            />
-          </div>
-          <div className="flex flex-wrap items-end gap-3">
-            <div>
-              <label className="block text-xs font-medium text-muted-foreground mb-1">Object</label>
-              <select
-                value={batchObjectType}
-                onChange={(e) => {
-                  setBatchObjectType(e.target.value as 'Lead' | 'Opportunity');
-                  // Field names differ per object — reset the subset selection.
-                  setBatchSelectedFields([]);
-                }}
-                className="rounded-md border bg-background px-3 py-2 text-sm"
-                disabled={batchRunning}
-              >
-                <option value="Lead">Lead</option>
-                <option value="Opportunity">Opportunity</option>
-              </select>
-            </div>
-            <div>
-              <label className="block text-xs font-medium text-muted-foreground mb-1">Mode</label>
-              <ModeToggle active={batchDryRun} onChange={setBatchDryRun} disabled={batchRunning} />
-            </div>
-          </div>
-
-          <BatchFieldSelector
-            objectType={batchObjectType}
-            disabled={batchRunning}
-            scopeAll={batchScopeAll}
-            selectedFields={batchSelectedFields}
-            onScopeAllChange={setBatchScopeAll}
-            onSelectedFieldsChange={setBatchSelectedFields}
-          />
-
-          <div className="flex items-center gap-3">
-            <button
-              onClick={handleBatchRun}
-              disabled={batchRunning || !soqlQuery.trim() || (!batchScopeAll && batchSelectedFields.length === 0)}
-              type="button"
-              className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-700 disabled:opacity-50 transition"
-            >
-              {batchRunning ? 'Starting...' : 'Start Batch'}
-            </button>
-            {!batchScopeAll && (
-              <span className="text-xs text-muted-foreground">
-                {batchSelectedFields.length === 0
-                  ? 'Select at least one field'
-                  : `${batchSelectedFields.length} field${batchSelectedFields.length === 1 ? '' : 's'} will be processed`}
-              </span>
-            )}
-          </div>
-        </div>
-
-        {batchError && (
-          <p className="mt-3 text-sm text-destructive">{batchError}</p>
         )}
       </section>
 
@@ -380,19 +229,21 @@ export default function DataEntryDashboard() {
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-4">
             <h2 className="text-lg font-semibold">Run History</h2>
-            <div className="flex gap-1">
-              {['all', 'manual', 'soql_query', 'webhook', 'cli'].map((t) => (
+            <div className="flex gap-1" role="group" aria-label="Filter runs by trigger">
+              {TRIGGER_FILTERS.map((t) => (
                 <button
                   key={t}
                   type="button"
+                  disabled={loadingHistory}
+                  aria-pressed={typeFilter === t}
                   onClick={() => handleFilterChange(t)}
-                  className={`rounded-full px-3 py-1 text-xs font-medium transition ${
+                  className={`rounded-full px-3 py-1 text-xs font-medium transition disabled:opacity-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-200 ${
                     typeFilter === t
                       ? 'bg-foreground text-background'
                       : 'bg-muted text-muted-foreground hover:text-foreground'
                   }`}
                 >
-                  {t === 'all' ? 'All' : t === 'soql_query' ? 'batch' : t}
+                  {t === 'all' ? 'All' : t}
                 </button>
               ))}
             </div>
@@ -403,23 +254,24 @@ export default function DataEntryDashboard() {
                 onClick={handleProcessAllReady}
                 disabled={processingAll}
                 type="button"
-                className="rounded-lg bg-amber-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-amber-700 disabled:opacity-50 transition"
+                className="rounded-lg bg-amber-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-amber-700 disabled:opacity-50 transition focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-200"
               >
-                {processingAll ? 'Processing...' : `Process ${readyCount} Ready`}
+                {processingAll ? 'Re-queuing...' : `Process ${readyCount} Ready`}
               </button>
             )}
             <button
               onClick={() => loadHistory()}
+              disabled={loadingHistory}
               type="button"
-              className="text-sm text-muted-foreground hover:text-foreground transition"
+              className="text-sm text-muted-foreground hover:text-foreground transition disabled:opacity-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-200 rounded"
             >
-              Refresh
+              {loadingHistory ? 'Refreshing...' : 'Refresh'}
             </button>
           </div>
         </div>
 
         {processAllStatus && (
-          <p className={`mt-2 text-sm ${processAllStatus.startsWith('Error') ? 'text-destructive' : processAllStatus.startsWith('Done') ? 'text-green-700' : 'text-amber-700 animate-pulse'}`}>
+          <p className={`mt-2 text-sm ${processAllStatus.startsWith('Error') ? 'text-destructive' : 'text-emerald-700'}`}>
             {processAllStatus}
           </p>
         )}
@@ -434,6 +286,18 @@ export default function DataEntryDashboard() {
                 <div className="ml-auto h-5 w-16 animate-pulse rounded-full bg-muted" />
               </div>
             ))}
+          </div>
+        ) : historyError ? (
+          <div className="mt-4 rounded-lg border border-destructive/40 bg-destructive/5 p-4">
+            <p className="text-sm font-medium text-destructive">Couldn&apos;t load run history</p>
+            <p className="mt-1 text-xs text-muted-foreground break-words">{historyError}</p>
+            <button
+              onClick={() => loadHistory()}
+              type="button"
+              className="mt-3 rounded-lg border px-3 py-1.5 text-sm font-medium hover:bg-accent transition focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-200"
+            >
+              Retry
+            </button>
           </div>
         ) : filteredRows.length === 0 ? (
           <p className="mt-4 text-sm text-muted-foreground">
@@ -456,11 +320,11 @@ export default function DataEntryDashboard() {
                 row.kind === 'batch' ? (
                   <tr key={`b-${row.data.id}`} className="border-b last:border-0 hover:bg-accent/50 transition">
                     <td className="py-2 pr-3">
-                      <Link href={`/data-entry/batches/${row.data.id}`} className="font-medium text-blue-600 hover:underline">
+                      <Link href={`/data-entry/runs/${row.data.id}`} className="font-medium text-blue-600 hover:underline focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-200 rounded">
                         {row.data.trigger_type}
                       </Link>
                     </td>
-                    <td className="py-2 pr-3">{row.data.object_type}</td>
+                    <td className="py-2 pr-3">{row.data.object_type ?? '—'}</td>
                     <td className="py-2 pr-3">
                       {row.data.completed_records + row.data.failed_records}/{row.data.total_records}
                     </td>
@@ -474,31 +338,33 @@ export default function DataEntryDashboard() {
                   <tr key={`q-${row.data.id}`} className="border-b last:border-0 hover:bg-accent/50 transition">
                     <td className="py-2 pr-3">
                       {row.data.run_id ? (
-                        <Link href={`/data-entry/runs/${row.data.run_id}`} className="font-medium text-blue-600 hover:underline">
-                          webhook
+                        <Link href={`/data-entry/runs/${row.data.run_id}`} className="font-medium text-blue-600 hover:underline focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-200 rounded">
+                          {row.data.trigger_event}
                         </Link>
                       ) : (
-                        <span className="font-medium text-muted-foreground">webhook</span>
+                        <span className="font-medium text-muted-foreground">{row.data.trigger_event}</span>
                       )}
                     </td>
-                    <td className="py-2 pr-3">{row.data.object_type}</td>
-                    <td className="py-2 pr-3 font-mono text-xs" title={row.data.record_id}>
-                      {row.data.record_id.slice(0, 15)}
+                    <td className="py-2 pr-3">{row.data.object_type ?? '—'}</td>
+                    <td className="py-2 pr-3 font-mono text-xs" title={row.data.record_id ?? ''}>
+                      {(row.data.record_id ?? '—').slice(0, 15)}
                     </td>
                     <td className="py-2 pr-3"><StatusBadge status={row.data.status} /></td>
                     <td className="py-2 pr-3">
-                      {row.data.status === 'waiting' && (
+                      {processedQueueId === row.data.id ? (
+                        <span className="text-xs text-emerald-700">Re-queued — dispatching shortly</span>
+                      ) : row.data.status === 'pending' ? (
                         <button
                           type="button"
                           onClick={() => handleProcessNow(row.data.id)}
                           disabled={processingQueueId === row.data.id}
-                          className="rounded-md border border-amber-300 bg-amber-50 px-2 py-0.5 text-xs font-medium text-amber-800 hover:bg-amber-100 disabled:opacity-50 transition"
+                          className="rounded-md border border-amber-300 bg-amber-50 px-2 py-0.5 text-xs font-medium text-amber-800 hover:bg-amber-100 disabled:opacity-50 transition focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-200"
                         >
                           {processingQueueId === row.data.id
-                            ? 'Processing...'
+                            ? 'Re-queuing...'
                             : `${formatTimeUntil(row.data.scheduled_at)} — Process Now`}
                         </button>
-                      )}
+                      ) : null}
                       {row.data.attempts > 0 && row.data.status === 'failed' && (
                         <span className="text-xs text-destructive">
                           {row.data.attempts}/{row.data.max_attempts} attempts
@@ -535,7 +401,8 @@ function ModeToggle({
         type="button"
         onClick={() => onChange(true)}
         disabled={disabled}
-        className={`px-3 py-2 transition ${
+        aria-pressed={active}
+        className={`px-3 py-2 transition focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-200 ${
           active
             ? 'bg-sky-100 text-sky-800'
             : 'bg-background text-muted-foreground hover:text-foreground'
@@ -547,9 +414,10 @@ function ModeToggle({
         type="button"
         onClick={() => onChange(false)}
         disabled={disabled}
-        className={`px-3 py-2 border-l transition ${
+        aria-pressed={!active}
+        className={`px-3 py-2 border-l transition focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-200 ${
           !active
-            ? 'bg-green-100 text-green-800'
+            ? 'bg-emerald-100 text-emerald-800'
             : 'bg-background text-muted-foreground hover:text-foreground'
         }`}
       >

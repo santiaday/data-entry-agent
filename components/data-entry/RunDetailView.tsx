@@ -5,20 +5,23 @@ import Link from 'next/link';
 import { StatusBadge, WriteStatusBadge, DryRunBadge } from './StatusBadge';
 import { StatCard } from './StatCard';
 import { ConfidenceBar } from './ConfidenceBar';
-import type { RunListItem, ExtractionRow, PhaseTimingRow, BatchExecutionRow, WriteResultRow, FetchInventoryRow } from './types';
+import type { RunListItem, ExtractionRow, WriteResultRow } from './types';
 
 type RunDetail = RunListItem & {
-  batch_id: string;
-  fetch_errors: { source: string; error: string }[] | null;
-  batch_errors: { batchId: string; error: string }[] | null;
   write_results: WriteResultRow[] | null;
-  fetch_inventory: FetchInventoryRow[] | null;
-  phase_timings: PhaseTimingRow[] | null;
-  batch_executions: BatchExecutionRow[] | null;
-  total_prompt_tokens: number | null;
-  total_completion_tokens: number | null;
-  de_batches?: { trigger_type: string; soql_query: string | null; dry_run: boolean };
 };
+
+/** write_outcome values that count as a genuine error (matches extractionCounts). */
+const ERROR_OUTCOMES = new Set([
+  'invalid',
+  'sf_rejected',
+  'write_silently_dropped',
+  'write_failed',
+]);
+
+function isErrorRow(e: ExtractionRow): boolean {
+  return ERROR_OUTCOMES.has(e.write_outcome ?? '') || (e.validation_errors ?? []).length > 0;
+}
 
 export default function RunDetailView({
   run,
@@ -36,12 +39,13 @@ export default function RunDetailView({
   // Get unique batch IDs for the filter
   const batchIds = [...new Set(extractions.map((e) => e.batch_id))].sort();
 
-  // Filter extractions
+  // Filter extractions — 'error'/'skipped' classification follows the
+  // write_outcome taxonomy so the table agrees with the headline counts.
   const filtered = extractions.filter((e) => {
     if (filterBatch !== 'all' && e.batch_id !== filterBatch) return false;
     if (filterStatus === 'written' && !e.was_written) return false;
-    if (filterStatus === 'skipped' && (e.was_written || (e.validation_errors && e.validation_errors.length > 0))) return false;
-    if (filterStatus === 'error' && (!e.validation_errors || e.validation_errors.length === 0)) return false;
+    if (filterStatus === 'skipped' && (e.was_written || isErrorRow(e))) return false;
+    if (filterStatus === 'error' && !isErrorRow(e)) return false;
     return true;
   });
 
@@ -63,18 +67,10 @@ export default function RunDetailView({
         <div className="flex items-center gap-3 text-sm">
           <Link
             href={`/data-entry/search?recordId=${encodeURIComponent(run.record_id)}`}
-            className="text-muted-foreground hover:text-foreground transition"
+            className="text-muted-foreground hover:text-foreground transition focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-200 rounded"
           >
             All runs for this record
           </Link>
-          {run.batch_id ? (
-            <Link
-              href={`/data-entry/batches/${run.batch_id}`}
-              className="text-blue-600 hover:underline"
-            >
-              View Batch
-            </Link>
-          ) : null}
         </div>
       </div>
 
@@ -88,7 +84,7 @@ export default function RunDetailView({
               <p className="mt-1 text-xs text-muted-foreground">
                 The full error captured at failure time is below. Phase, error class, and stack trace included.
               </p>
-              <pre className="mt-3 overflow-x-auto rounded border border-destructive/20 bg-white p-3 text-xs font-mono whitespace-pre-wrap break-words max-h-96 overflow-y-auto">
+              <pre className="mt-3 overflow-x-auto rounded border border-destructive/20 bg-card p-3 text-xs font-mono whitespace-pre-wrap break-words max-h-96 overflow-y-auto">
                 {run.error}
               </pre>
             </div>
@@ -104,29 +100,9 @@ export default function RunDetailView({
         <StatCard label="Errors" value={run.fields_errored} />
       </div>
 
-      {/* ── Context Found ─────────────────────────────── */}
-      {run.fetch_inventory && run.fetch_inventory.length > 0 && (
-        <ContextFoundPanel items={run.fetch_inventory} />
-      )}
-
-      {/* ── Performance ───────────────────────────────── */}
-      <PerformancePanel run={run} />
-
       {/* ── Write Verification ────────────────────────── */}
       {run.write_results && run.write_results.length > 0 && (
         <WriteVerificationPanel results={run.write_results} />
-      )}
-
-      {/* ── Errors ────────────────────────────────────── */}
-      {run.fetch_errors && run.fetch_errors.length > 0 && (
-        <div className="rounded-xl border border-destructive/50 bg-destructive/10 p-4">
-          <h3 className="text-sm font-medium text-destructive">Fetch Errors</h3>
-          <ul className="mt-2 space-y-1 text-sm text-destructive">
-            {run.fetch_errors.map((e, i) => (
-              <li key={i}>{e.source}: {e.error}</li>
-            ))}
-          </ul>
-        </div>
       )}
 
       {/* ── Filters ───────────────────────────────────── */}
@@ -136,7 +112,7 @@ export default function RunDetailView({
           <select
             value={filterBatch}
             onChange={(e) => setFilterBatch(e.target.value)}
-            className="rounded-lg border bg-background px-2 py-1.5 text-sm transition focus:outline-none focus:ring-2 focus:ring-emerald-200"
+            className="rounded-lg border bg-background px-2 py-1.5 text-sm transition focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-200"
           >
             <option value="all">All batches</option>
             {batchIds.map((id) => (
@@ -149,7 +125,7 @@ export default function RunDetailView({
           <select
             value={filterStatus}
             onChange={(e) => setFilterStatus(e.target.value)}
-            className="rounded-lg border bg-background px-2 py-1.5 text-sm transition focus:outline-none focus:ring-2 focus:ring-emerald-200"
+            className="rounded-lg border bg-background px-2 py-1.5 text-sm transition focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-200"
           >
             <option value="all">All</option>
             <option value="written">Written</option>
@@ -227,8 +203,17 @@ function ExtractionTableRow({
   return (
     <>
       <tr
-        className={`border-b last:border-0 cursor-pointer hover:bg-accent/50 transition ${rowBg}`}
+        className={`border-b last:border-0 cursor-pointer hover:bg-accent/50 transition focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-emerald-200 ${rowBg}`}
         onClick={onToggle}
+        role="button"
+        tabIndex={0}
+        aria-expanded={expanded}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault();
+            onToggle();
+          }
+        }}
       >
         <td className="px-3 py-2 font-mono text-xs">{ext.field_name}</td>
         <td className="px-3 py-2 text-xs text-muted-foreground">{ext.batch_id}</td>
@@ -291,106 +276,6 @@ function ExtractionTableRow({
   );
 }
 
-// ─── Performance Panel ──────────────────────────────────────
-
-function PerformancePanel({ run }: { run: {
-  phase_timings: PhaseTimingRow[] | null;
-  batch_executions: BatchExecutionRow[] | null;
-  total_prompt_tokens: number | null;
-  total_completion_tokens: number | null;
-  duration_ms: number | null;
-} }) {
-  const phases = run.phase_timings ?? [];
-  const batches = run.batch_executions ?? [];
-  const totalPromptTokens = run.total_prompt_tokens ?? 0;
-  const totalCompletionTokens = run.total_completion_tokens ?? 0;
-
-  if (phases.length === 0 && batches.length === 0) return null;
-
-  // Rough cost estimate — gpt-4o pricing as of 2025:
-  // $2.50 / 1M input tokens, $10.00 / 1M output tokens.
-  const estCostUsd =
-    (totalPromptTokens * 2.5 + totalCompletionTokens * 10) / 1_000_000;
-
-  const totalPhaseMs = phases.reduce((s, p) => s + p.durationMs, 0);
-  const maxPhaseMs = Math.max(...phases.map((p) => p.durationMs), 1);
-
-  return (
-    <section className="rounded-xl border bg-card p-5">
-      <div className="flex items-center justify-between">
-        <h3 className="text-sm font-semibold">Performance</h3>
-        <div className="flex items-center gap-4 text-xs text-muted-foreground">
-          <span>{totalPromptTokens.toLocaleString()} in</span>
-          <span>{totalCompletionTokens.toLocaleString()} out</span>
-          <span>~${estCostUsd.toFixed(4)} est.</span>
-        </div>
-      </div>
-
-      {/* Phase bars */}
-      {phases.length > 0 && (
-        <div className="mt-4 space-y-1.5">
-          {phases.map((p) => (
-            <div key={p.phase} className="flex items-center gap-3">
-              <span className="w-20 shrink-0 font-mono text-xs text-muted-foreground">{p.phase}</span>
-              <div className="relative h-5 flex-1 rounded bg-gray-100">
-                <div
-                  className="absolute inset-y-0 left-0 rounded bg-blue-500"
-                  style={{ width: `${(p.durationMs / maxPhaseMs) * 100}%` }}
-                />
-              </div>
-              <span className="w-16 shrink-0 text-right font-mono text-xs">
-                {(p.durationMs / 1000).toFixed(2)}s
-              </span>
-            </div>
-          ))}
-          <div className="pt-1 text-right text-xs text-muted-foreground">
-            Total phases: {(totalPhaseMs / 1000).toFixed(2)}s
-            {run.duration_ms && run.duration_ms !== totalPhaseMs && (
-              <span className="ml-2">(run: {(run.duration_ms / 1000).toFixed(2)}s)</span>
-            )}
-          </div>
-        </div>
-      )}
-
-      {/* Batch table */}
-      {batches.length > 0 && (
-        <details className="mt-5">
-          <summary className="cursor-pointer text-xs font-medium text-muted-foreground hover:text-foreground">
-            Per-batch breakdown ({batches.length} batches)
-          </summary>
-          <table className="mt-2 w-full text-xs">
-            <thead>
-              <tr className="border-b text-left text-muted-foreground">
-                <th className="py-1.5 pr-3 font-normal">Batch</th>
-                <th className="py-1.5 pr-3 font-normal">Duration</th>
-                <th className="py-1.5 pr-3 font-normal">In tokens</th>
-                <th className="py-1.5 pr-3 font-normal">Out tokens</th>
-                <th className="py-1.5 font-normal">Status</th>
-              </tr>
-            </thead>
-            <tbody>
-              {batches.map((b) => (
-                <tr key={b.batchId} className="border-b last:border-0">
-                  <td className="py-1.5 pr-3 font-mono">{b.batchId}</td>
-                  <td className="py-1.5 pr-3 font-mono">{(b.durationMs / 1000).toFixed(2)}s</td>
-                  <td className="py-1.5 pr-3 font-mono text-muted-foreground">{b.promptTokens.toLocaleString()}</td>
-                  <td className="py-1.5 pr-3 font-mono text-muted-foreground">{b.completionTokens.toLocaleString()}</td>
-                  <td className="py-1.5">
-                    <span className={b.status === 'success' ? 'text-green-700' : 'text-red-700'}>
-                      {b.status}
-                    </span>
-                    {b.error && <span className="ml-2 text-muted-foreground" title={b.error}>⚠</span>}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </details>
-      )}
-    </section>
-  );
-}
-
 // ─── Write Verification Panel ───────────────────────────────
 
 function WriteVerificationPanel({ results }: { results: WriteResultRow[] }) {
@@ -400,10 +285,20 @@ function WriteVerificationPanel({ results }: { results: WriteResultRow[] }) {
   const hasIssue = totalDropped > 0 || results.some((r) => r.error);
 
   return (
-    <section className={`rounded-lg border p-5 ${hasIssue ? 'border-orange-300 bg-orange-50/50' : 'bg-card'}`}>
+    <section className={`rounded-xl border p-5 ${hasIssue ? 'border-orange-300 bg-orange-50/50' : 'bg-card'}`}>
       <div className="flex items-center justify-between">
-        <h3 className="text-sm font-semibold">
-          {hasIssue ? '⚠ Write Verification — issues detected' : '✓ Write Verification'}
+        <h3 className="flex items-center gap-2 text-sm font-semibold">
+          {hasIssue ? (
+            <svg aria-hidden="true" className="h-4 w-4 text-orange-600" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0Z" />
+              <path d="M12 9v4M12 17h.01" />
+            </svg>
+          ) : (
+            <svg aria-hidden="true" className="h-4 w-4 text-emerald-600" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M20 6 9 17l-5-5" />
+            </svg>
+          )}
+          {hasIssue ? 'Write Verification — issues detected' : 'Write Verification'}
         </h3>
         <div className="text-xs text-muted-foreground">
           {totalWritten}/{totalAttempted} verified written{totalDropped > 0 ? ` · ${totalDropped} silently dropped by SF` : ''}
@@ -411,7 +306,7 @@ function WriteVerificationPanel({ results }: { results: WriteResultRow[] }) {
       </div>
 
       {totalDropped > 0 && (
-        <div className="mt-3 rounded border border-orange-200 bg-white p-3 text-xs">
+        <div className="mt-3 rounded-lg border border-orange-200 bg-card p-3 text-xs">
           <p className="font-medium text-orange-900">
             {totalDropped} field{totalDropped === 1 ? '' : 's'} returned success from Salesforce but didn't actually update.
           </p>
@@ -432,7 +327,6 @@ function WriteVerificationPanel({ results }: { results: WriteResultRow[] }) {
         <thead>
           <tr className="border-b text-left text-muted-foreground">
             <th className="py-1.5 pr-3 font-normal">Object</th>
-            <th className="py-1.5 pr-3 font-normal">Record</th>
             <th className="py-1.5 pr-3 font-normal">Attempted</th>
             <th className="py-1.5 pr-3 font-normal">Verified Written</th>
             <th className="py-1.5 pr-3 font-normal">Silently Dropped</th>
@@ -440,82 +334,19 @@ function WriteVerificationPanel({ results }: { results: WriteResultRow[] }) {
           </tr>
         </thead>
         <tbody>
-          {results.map((r) => (
-            <tr key={`${r.objectType}-${r.recordId}`} className="border-b last:border-0">
+          {results.map((r, i) => (
+            <tr key={`${r.objectType}-${i}`} className="border-b last:border-0">
               <td className="py-1.5 pr-3 font-mono">{r.objectType}</td>
-              <td className="py-1.5 pr-3 font-mono text-muted-foreground">{r.recordId}</td>
               <td className="py-1.5 pr-3 font-mono">{r.fieldsAttempted}</td>
-              <td className="py-1.5 pr-3 font-mono text-green-700">{r.fieldsVerifiedWritten}</td>
+              <td className="py-1.5 pr-3 font-mono text-emerald-700">{r.fieldsVerifiedWritten}</td>
               <td className={`py-1.5 pr-3 font-mono ${r.silentlyDropped > 0 ? 'text-orange-700 font-medium' : 'text-muted-foreground'}`}>
                 {r.silentlyDropped}
               </td>
-              <td className="py-1.5 text-red-700">{r.error ?? ''}</td>
+              <td className="py-1.5 text-destructive">{r.error ?? ''}</td>
             </tr>
           ))}
         </tbody>
       </table>
     </section>
   );
-}
-
-// ─── Context Found Panel ────────────────────────────────────
-
-function ContextFoundPanel({ items }: { items: FetchInventoryRow[] }) {
-  const totalItems = items.reduce((s, i) => s + i.count, 0);
-  const sourcesWithData = items.filter((i) => i.status === 'ok').length;
-  const errors = items.filter((i) => i.status === 'error').length;
-
-  return (
-    <section className="rounded-xl border bg-card p-5">
-      <div className="flex items-center justify-between">
-        <h3 className="text-sm font-semibold">Context Found</h3>
-        <div className="text-xs text-muted-foreground">
-          {sourcesWithData}/{items.length} sources returned data · {totalItems.toLocaleString()} items total
-          {errors > 0 && <span className="ml-2 text-destructive">· {errors} error{errors === 1 ? '' : 's'}</span>}
-        </div>
-      </div>
-      <p className="mt-1 text-xs text-muted-foreground">
-        What each data source contributed during the fetch phase. Use this to see if the LLM had enough context
-        to extract fields — e.g. if Gong Transcripts shows 0, fields that rely on call data will likely come back null.
-      </p>
-
-      <table className="mt-4 w-full text-sm">
-        <thead>
-          <tr className="border-b text-left text-xs text-muted-foreground">
-            <th className="py-2 pr-3 font-normal">Source</th>
-            <th className="py-2 pr-3 font-normal">Status</th>
-            <th className="py-2 pr-3 font-normal">Count</th>
-            <th className="py-2 font-normal">Notes</th>
-          </tr>
-        </thead>
-        <tbody>
-          {items.map((item) => (
-            <tr key={item.source} className="border-b last:border-0">
-              <td className="py-1.5 pr-3">{item.source}</td>
-              <td className="py-1.5 pr-3">
-                <FetchStatusBadge status={item.status} />
-              </td>
-              <td className="py-1.5 pr-3 font-mono">
-                {item.count > 0 ? item.count.toLocaleString() : <span className="text-muted-foreground">0</span>}
-              </td>
-              <td className="py-1.5 text-xs text-muted-foreground max-w-[400px] truncate" title={item.error ?? ''}>
-                {item.error ?? ''}
-              </td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </section>
-  );
-}
-
-function FetchStatusBadge({ status }: { status: 'ok' | 'empty' | 'error' }) {
-  switch (status) {
-    case 'ok':
-      return <span className="inline-flex rounded-full bg-green-100 px-2 py-0.5 text-xs font-medium text-green-800">ok</span>;
-    case 'empty':
-      return <span className="inline-flex rounded-full bg-gray-100 px-2 py-0.5 text-xs font-medium text-gray-700">empty</span>;
-    case 'error':
-      return <span className="inline-flex rounded-full bg-red-100 px-2 py-0.5 text-xs font-medium text-red-800">error</span>;
-  }
 }
