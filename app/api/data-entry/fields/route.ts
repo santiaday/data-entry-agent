@@ -12,6 +12,8 @@ import { z } from 'zod';
 import { createServiceClient } from '@/lib/supabase/server';
 import { getAuthContext } from '@/lib/auth';
 import { AGENT_REF, jsonError, mapField, deriveFieldKey } from '@/lib/revops/mappers';
+import { withRevops, mapDbWriteError } from '@/lib/revops/with-revops';
+import { VALUE_TYPES } from '@/lib/revops/field-constants';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -37,7 +39,7 @@ function deriveBatches(rows: Array<{ group_key?: string | null }>) {
   return batches.sort((a, b) => a.batchId.localeCompare(b.batchId));
 }
 
-export async function GET() {
+export const GET = withRevops(async () => {
   const ctx = await getAuthContext();
   if (!ctx.permissions.modules.data_entry.access) {
     return jsonError('Forbidden', 403, 'FORBIDDEN');
@@ -52,7 +54,8 @@ export async function GET() {
     .order('sort_order', { ascending: true });
 
   if (error) {
-    return jsonError(error.message, 500, 'QUERY_FAILED');
+    console.error('[fields GET] query error:', error.code, error.message);
+    return jsonError('Failed to load field configs', 500, 'QUERY_FAILED');
   }
 
   const rows = data ?? [];
@@ -64,7 +67,7 @@ export async function GET() {
     batches: deriveBatches(rows),
     totalFields: fields.length,
   });
-}
+});
 
 /**
  * The React form (FieldConfigBrowser) posts camelCase keys. Accept those and
@@ -75,7 +78,7 @@ const createSchema = z.object({
   configId: z.string().min(1).max(100).regex(/^[a-z0-9_]+$/, 'Use lowercase letters, digits, and underscores only').optional(),
   sfObject: z.enum(['Lead', 'Opportunity']),
   fieldName: z.string().min(1).max(100).regex(/__c$/, 'Custom field names must end with __c'),
-  valueType: z.enum(['picklist', 'multipicklist', 'text', 'textarea', 'number', 'date', 'datetime', 'boolean']),
+  valueType: z.enum(VALUE_TYPES),
   batchId: z.string().min(1),
   instruction: z.string().min(10).max(5000),
   writeMode: z.enum(['overwrite', 'fill_blank', 'append']),
@@ -92,7 +95,7 @@ const createSchema = z.object({
   sortOrder: z.number().int().optional(),
 });
 
-export async function POST(request: Request) {
+export const POST = withRevops(async (request: Request) => {
   const ctx = await getAuthContext();
   if (!ctx.permissions.modules.data_entry.can_edit_fields) {
     return jsonError('Forbidden', 403, 'FORBIDDEN');
@@ -134,8 +137,13 @@ export async function POST(request: Request) {
     .single();
 
   if (error) {
-    return jsonError(error.message, 500, 'CREATE_FAILED');
+    return mapDbWriteError(
+      error,
+      'A field with that key already exists',
+      'Failed to create field',
+      'CREATE_FAILED',
+    );
   }
 
   return NextResponse.json({ field: { ...mapField(data), id: data.id } }, { status: 201 });
-}
+});

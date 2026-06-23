@@ -13,38 +13,52 @@ export default function SearchByRecordId({ initialRecordId }: { initialRecordId:
   const [queueItems, setQueueItems] = useState<QueueItem[]>([]);
   const [loading, setLoading] = useState(false);
   const [searched, setSearched] = useState(false);
+  const [searchError, setSearchError] = useState<string | null>(null);
 
   const search = useCallback(async (rid: string) => {
     if (!rid.trim()) return;
     setLoading(true);
     setSearched(true);
+    setSearchError(null);
     try {
       const [runRes, queueRes] = await Promise.all([
         fetch(`/api/data-entry/search?recordId=${encodeURIComponent(rid.trim())}`),
         fetch(`/api/data-entry/queue?recordId=${encodeURIComponent(rid.trim())}`),
       ]);
+      if (!runRes.ok || !queueRes.ok) {
+        const failed = !runRes.ok ? runRes : queueRes;
+        const body = await failed.json().catch(() => ({}));
+        throw new Error(body.error ?? `Search failed (${failed.status})`);
+      }
       const [runData, queueData] = await Promise.all([runRes.json(), queueRes.json()]);
       setRuns(runData.runs ?? []);
       setQueueItems(queueData.queue ?? []);
+    } catch (e) {
+      setRuns([]);
+      setQueueItems([]);
+      setSearchError(e instanceof Error ? e.message : 'Search failed');
     } finally {
       setLoading(false);
     }
   }, []);
 
   const [processingQueueId, setProcessingQueueId] = useState<string | null>(null);
+  const [processedQueueId, setProcessedQueueId] = useState<string | null>(null);
 
   async function handleProcessNow(queueId: string) {
     setProcessingQueueId(queueId);
     try {
       const res = await fetch(`/api/data-entry/queue/${queueId}/skip`, { method: 'POST' });
-      const data = await res.json();
-      if (data.runId) {
-        window.location.href = `/data-entry/runs/${data.runId}`;
-      } else {
-        search(recordId);
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setSearchError(data.error ?? 'Re-queue failed');
+        return;
       }
-    } catch {
+      setProcessedQueueId(queueId);
+      setTimeout(() => setProcessedQueueId(null), 4000);
       search(recordId);
+    } catch (err) {
+      setSearchError(err instanceof Error ? err.message : 'Re-queue failed');
     } finally {
       setProcessingQueueId(null);
     }
@@ -79,17 +93,33 @@ export default function SearchByRecordId({ initialRecordId }: { initialRecordId:
           value={recordId}
           onChange={(e) => setRecordId(e.target.value)}
           placeholder="006QU00000kz8CgYAI"
-          className="flex-1 rounded-lg border bg-background px-3 py-2 text-sm font-mono transition focus:outline-none focus:ring-2 focus:ring-emerald-200"
+          aria-label="Record ID"
+          className="flex-1 rounded-lg border bg-background px-3 py-2 text-sm font-mono transition focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-200"
           autoFocus
         />
         <button
           type="submit"
           disabled={loading || recordId.trim().length < 3}
-          className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-700 disabled:opacity-50 transition"
+          className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-700 disabled:opacity-50 transition focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-200"
         >
           {loading ? 'Searching...' : 'Search'}
         </button>
       </form>
+
+      {/* Error state (distinct from genuine empty results) */}
+      {!loading && searchError && (
+        <div className="rounded-xl border border-destructive/40 bg-destructive/5 p-4">
+          <p className="text-sm font-medium text-destructive">Search failed</p>
+          <p className="mt-1 text-xs text-muted-foreground break-words">{searchError}</p>
+          <button
+            onClick={() => search(recordId)}
+            type="button"
+            className="mt-3 rounded-lg border px-3 py-1.5 text-sm font-medium hover:bg-accent transition focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-200"
+          >
+            Retry
+          </button>
+        </div>
+      )}
 
       {/* Results */}
       {loading && (
@@ -118,7 +148,7 @@ export default function SearchByRecordId({ initialRecordId }: { initialRecordId:
               >
                 <div className="flex items-center gap-3">
                   <StatusBadge status={q.status} />
-                  <span className="text-sm">{q.object_type}</span>
+                  <span className="text-sm">{q.object_type ?? '—'}</span>
                   <span className="text-xs text-muted-foreground">
                     {q.trigger_event} — {new Date(q.created_at).toLocaleString()}
                   </span>
@@ -126,30 +156,32 @@ export default function SearchByRecordId({ initialRecordId }: { initialRecordId:
                     <span className="text-xs text-destructive">{q.last_error}</span>
                   )}
                 </div>
-                {q.status === 'waiting' && (
+                {processedQueueId === q.id ? (
+                  <span className="text-xs text-emerald-700">Re-queued — dispatching shortly</span>
+                ) : q.status === 'pending' ? (
                   <button
                     type="button"
                     onClick={() => handleProcessNow(q.id)}
                     disabled={processingQueueId === q.id}
-                    className="rounded-md border border-amber-300 bg-amber-50 px-3 py-1 text-xs font-medium text-amber-800 hover:bg-amber-100 disabled:opacity-50 transition"
+                    className="rounded-md border border-amber-300 bg-amber-50 px-3 py-1 text-xs font-medium text-amber-800 hover:bg-amber-100 disabled:opacity-50 transition focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-200"
                   >
-                    {processingQueueId === q.id ? 'Processing...' : 'Process Now'}
+                    {processingQueueId === q.id ? 'Re-queuing...' : 'Process Now'}
                   </button>
-                )}
+                ) : null}
               </div>
             ))}
           </div>
         </div>
       )}
 
-      {!loading && searched && runs.length === 0 && queueItems.length === 0 && (
+      {!loading && !searchError && searched && runs.length === 0 && queueItems.length === 0 && (
         <div className="rounded-xl border border-dashed p-8 text-center">
           <p className="text-sm text-muted-foreground">
             No runs or queued items found for <span className="font-mono">{recordId}</span>.
           </p>
           <p className="mt-2 text-xs text-muted-foreground">
-            If the agent definitely ran for this record but no row appears here, something blocked the run
-            from writing to Supabase before it could log. Check the CLI output or server logs.
+            The agent may not have processed this record yet. Queue it from the Dashboard, or check back after
+            the cron-driver dispatches the next batch.
           </p>
         </div>
       )}
@@ -165,7 +197,7 @@ export default function SearchByRecordId({ initialRecordId }: { initialRecordId:
               <Link
                 key={run.id}
                 href={`/data-entry/runs/${run.id}`}
-                className="block rounded-xl border bg-card p-4 hover:bg-accent/50 transition"
+                className="block rounded-xl border bg-card p-4 hover:bg-accent/50 transition focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-200"
               >
                 <div className="flex items-start justify-between gap-4">
                   <div className="flex-1 min-w-0">
@@ -195,7 +227,9 @@ export default function SearchByRecordId({ initialRecordId }: { initialRecordId:
                       </pre>
                     )}
                   </div>
-                  <span className="text-xs text-muted-foreground shrink-0">→</span>
+                  <svg aria-hidden="true" className="h-4 w-4 shrink-0 text-muted-foreground" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M5 12h14M13 6l6 6-6 6" />
+                  </svg>
                 </div>
               </Link>
             ))}

@@ -2,14 +2,18 @@
  * PUT    /api/data-entry/fields/[id] — Update a field config (partial).
  * DELETE /api/data-entry/fields/[id] — Soft delete (sets is_active = false).
  *
- * [id] is the field_key. Rows live in config.field_definitions and are scoped
- * by agent_ref = AGENT_REF (there is no org_id). Both verbs require can_edit_fields.
+ * [id] is the config.field_definitions surrogate id (row.id), re-attached by the
+ * list route (fields/route.ts) and used by the client for edit/delete — NOT the
+ * field_key. Rows live in config.field_definitions and are scoped by
+ * agent_ref = AGENT_REF (there is no org_id). Both verbs require can_edit_fields.
  */
 
 import { z } from 'zod';
 import { createServiceClient } from '@/lib/supabase/server';
 import { getAuthContext } from '@/lib/auth';
 import { AGENT_REF, jsonError, mapField } from '@/lib/revops/mappers';
+import { withRevops, mapDbWriteError } from '@/lib/revops/with-revops';
+import { VALUE_TYPES } from '@/lib/revops/field-constants';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -17,19 +21,7 @@ export const dynamic = 'force-dynamic';
 const updateSchema = z.object({
   instruction: z.string().min(10).max(5000).optional(),
   writeMode: z.enum(['overwrite', 'fill_blank', 'append']).optional(),
-  valueType: z
-    .enum([
-      'picklist',
-      'multipicklist',
-      'text',
-      'textarea',
-      'number',
-      'currency',
-      'date',
-      'datetime',
-      'boolean',
-    ])
-    .optional(),
+  valueType: z.enum(VALUE_TYPES).optional(),
   batchId: z.string().min(1).optional(),
   options: z.array(z.string()).nullable().optional(),
   validation: z
@@ -45,10 +37,10 @@ const updateSchema = z.object({
   sortOrder: z.number().int().optional(),
 });
 
-export async function PUT(
+export const PUT = withRevops(async (
   request: Request,
   { params }: { params: Promise<{ id: string }> },
-) {
+) => {
   const { id } = await params;
 
   const ctx = await getAuthContext();
@@ -95,19 +87,24 @@ export async function PUT(
     .single();
 
   if (error) {
-    return jsonError(error.message, 500, 'UPDATE_FAILED');
+    return mapDbWriteError(
+      error,
+      'A field with that key already exists',
+      'Failed to update field',
+      'UPDATE_FAILED',
+    );
   }
   if (!data) {
     return jsonError('Field not found', 404, 'NOT_FOUND');
   }
 
   return Response.json({ field: mapField(data) });
-}
+});
 
-export async function DELETE(
+export const DELETE = withRevops(async (
   _request: Request,
   { params }: { params: Promise<{ id: string }> },
-) {
+) => {
   const { id } = await params;
 
   const ctx = await getAuthContext();
@@ -129,8 +126,13 @@ export async function DELETE(
     .eq('id', id);
 
   if (error) {
-    return jsonError(error.message, 500, 'DELETE_FAILED');
+    return mapDbWriteError(
+      error,
+      'A field with that key already exists',
+      'Failed to delete field',
+      'DELETE_FAILED',
+    );
   }
 
   return Response.json({ success: true });
-}
+});

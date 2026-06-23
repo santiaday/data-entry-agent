@@ -60,17 +60,29 @@ const SKIP_REASON_ACTIONS: Record<string, string> = {
 export default function AnalyticsView() {
   const [analytics, setAnalytics] = useState<Analytics | null>(null);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
   const [days, setDays] = useState(30);
   const [objectType, setObjectType] = useState<'all' | 'Lead' | 'Opportunity'>('all');
   const [skipReasonFilter, setSkipReasonFilter] = useState<string>('all');
 
   const load = useCallback(() => {
     setLoading(true);
+    setError(null);
     const params = new URLSearchParams({ days: String(days) });
     if (objectType !== 'all') params.set('objectType', objectType);
     fetch(`/api/data-entry/analytics?${params}`)
-      .then((r) => r.json())
+      .then(async (r) => {
+        const data = await r.json().catch(() => ({}));
+        if (!r.ok || !data || !data.totals) {
+          throw new Error(data?.error ?? `Failed to load analytics (${r.status})`);
+        }
+        return data as Analytics;
+      })
       .then((data) => setAnalytics(data))
+      .catch((e) => {
+        setAnalytics(null);
+        setError(e instanceof Error ? e.message : 'Failed to load analytics');
+      })
       .finally(() => setLoading(false));
   }, [days, objectType]);
 
@@ -91,7 +103,19 @@ export default function AnalyticsView() {
   }
 
   if (!analytics) {
-    return <p className="py-12 text-center text-sm text-destructive">Failed to load analytics.</p>;
+    return (
+      <div className="rounded-xl border border-destructive/40 bg-destructive/5 p-6">
+        <p className="text-sm font-medium text-destructive">Couldn&apos;t load analytics</p>
+        <p className="mt-1 text-xs text-muted-foreground break-words">{error ?? 'No data returned.'}</p>
+        <button
+          onClick={load}
+          type="button"
+          className="mt-3 rounded-lg border px-3 py-1.5 text-sm font-medium hover:bg-accent transition focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-200"
+        >
+          Retry
+        </button>
+      </div>
+    );
   }
 
   const filteredFields = skipReasonFilter === 'all'
@@ -118,7 +142,7 @@ export default function AnalyticsView() {
           <select
             value={days}
             onChange={(e) => setDays(parseInt(e.target.value, 10))}
-            className="rounded-lg border bg-background px-3 py-2 text-sm transition focus:outline-none focus:ring-2 focus:ring-emerald-200"
+            className="rounded-lg border bg-background px-3 py-2 text-sm transition focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-200"
           >
             <option value={1}>Last 1 day</option>
             <option value={7}>Last 7 days</option>
@@ -131,7 +155,7 @@ export default function AnalyticsView() {
           <select
             value={objectType}
             onChange={(e) => setObjectType(e.target.value as 'all' | 'Lead' | 'Opportunity')}
-            className="rounded-lg border bg-background px-3 py-2 text-sm transition focus:outline-none focus:ring-2 focus:ring-emerald-200"
+            className="rounded-lg border bg-background px-3 py-2 text-sm transition focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-200"
           >
             <option value="all">All</option>
             <option value="Lead">Lead</option>
@@ -184,8 +208,17 @@ export default function AnalyticsView() {
                 return (
                   <tr
                     key={r.reason}
-                    className={`border-b last:border-0 cursor-pointer hover:bg-accent/50 transition ${isFiltered ? 'bg-blue-50' : ''}`}
+                    role="button"
+                    tabIndex={0}
+                    aria-pressed={isFiltered}
+                    className={`border-b last:border-0 cursor-pointer hover:bg-accent/50 transition focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-emerald-200 ${isFiltered ? 'bg-blue-50' : ''}`}
                     onClick={() => setSkipReasonFilter(isFiltered ? 'all' : r.reason)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' || e.key === ' ') {
+                        e.preventDefault();
+                        setSkipReasonFilter(isFiltered ? 'all' : r.reason);
+                      }
+                    }}
                   >
                     <td className="py-2 pr-3 font-mono text-xs">
                       {r.reason}
@@ -229,7 +262,7 @@ export default function AnalyticsView() {
             <button
               onClick={() => setSkipReasonFilter('all')}
               type="button"
-              className="text-xs text-blue-600 hover:underline"
+              className="text-xs text-blue-600 hover:underline rounded focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-200"
             >
               Clear filter
             </button>
@@ -263,7 +296,7 @@ export default function AnalyticsView() {
                     <td className="py-2 pr-3 text-xs">{f.sfObject}</td>
                     <td className="py-2 pr-3 text-xs text-muted-foreground">{f.batchId}</td>
                     <td className="py-2 pr-3 font-mono">{f.totalAttempts}</td>
-                    <td className="py-2 pr-3 font-mono text-green-700">{f.written}</td>
+                    <td className="py-2 pr-3 font-mono text-emerald-700">{f.written}</td>
                     <td className="py-2 pr-3 font-mono text-yellow-700">{f.skipped}</td>
                     <td className="py-2 pr-3 font-mono text-destructive">{f.errored}</td>
                     <td className={`py-2 pr-3 font-mono ${rateColor}`}>

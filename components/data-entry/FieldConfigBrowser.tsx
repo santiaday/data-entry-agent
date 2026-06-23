@@ -26,13 +26,18 @@ type BatchConfigItem = {
   label: string;
 };
 
-const VALUE_TYPES = ['picklist', 'multipicklist', 'text', 'textarea', 'number', 'date', 'datetime', 'boolean'] as const;
+const VALUE_TYPES = ['picklist', 'multipicklist', 'text', 'textarea', 'number', 'currency', 'date', 'datetime', 'boolean'] as const;
 const WRITE_MODES = ['overwrite', 'fill_blank', 'append'] as const;
+
+const CONFIG_ID_RE = /^[a-z][a-z0-9_]*$/;
+const FIELD_NAME_RE = /__c$/;
 
 export default function FieldConfigBrowser() {
   const [fields, setFields] = useState<FieldConfigRow[]>([]);
   const [batches, setBatches] = useState<BatchConfigItem[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
   const [search, setSearch] = useState('');
   const [filterBatch, setFilterBatch] = useState<string>('all');
   const [showInactive, setShowInactive] = useState(false);
@@ -41,13 +46,20 @@ export default function FieldConfigBrowser() {
 
   const load = useCallback(() => {
     setLoading(true);
+    setLoadError(null);
     fetch('/api/data-entry/fields')
-      .then((r) => r.json())
+      .then(async (r) => {
+        if (!r.ok) {
+          const body = await r.json().catch(() => ({}));
+          throw new Error(body.error ?? `Failed to load fields (${r.status})`);
+        }
+        return r.json();
+      })
       .then((data) => {
         setFields(data.fields ?? []);
         setBatches(data.batches ?? []);
       })
-      .catch(() => {})
+      .catch((e) => setLoadError(e instanceof Error ? e.message : 'Failed to load fields'))
       .finally(() => setLoading(false));
   }, []);
 
@@ -98,11 +110,29 @@ export default function FieldConfigBrowser() {
         <button
           onClick={() => setShowAddForm(true)}
           type="button"
-          className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-700 transition"
+          className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-700 transition focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-200"
         >
           + Add Field
         </button>
       </div>
+
+      {loadError && (
+        <div className="rounded-xl border border-destructive/40 bg-destructive/5 p-4">
+          <p className="text-sm font-medium text-destructive">Couldn&apos;t load field configuration</p>
+          <p className="mt-1 text-xs text-muted-foreground break-words">{loadError}</p>
+          <button
+            onClick={load}
+            type="button"
+            className="mt-3 rounded-lg border px-3 py-1.5 text-sm font-medium hover:bg-accent transition focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-200"
+          >
+            Retry
+          </button>
+        </div>
+      )}
+
+      {actionError && (
+        <p className="text-sm text-destructive">{actionError}</p>
+      )}
 
       {/* ── Filters ───────────────────────────────────── */}
       <div className="flex flex-wrap items-end gap-3">
@@ -113,7 +143,8 @@ export default function FieldConfigBrowser() {
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             placeholder="Field name or instruction..."
-            className="w-full rounded-xl border bg-background px-3 py-2 text-sm transition focus:outline-none focus:ring-2 focus:ring-emerald-200"
+            aria-label="Search fields"
+            className="w-full rounded-lg border bg-background px-3 py-2 text-sm transition focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-200"
           />
         </div>
         <div>
@@ -121,7 +152,7 @@ export default function FieldConfigBrowser() {
           <select
             value={filterBatch}
             onChange={(e) => setFilterBatch(e.target.value)}
-            className="rounded-md border bg-background px-3 py-2 text-sm"
+            className="rounded-lg border bg-background px-3 py-2 text-sm transition focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-200"
           >
             <option value="all">All batches</option>
             {batches.map((b) => (
@@ -134,7 +165,7 @@ export default function FieldConfigBrowser() {
             type="checkbox"
             checked={showInactive}
             onChange={(e) => setShowInactive(e.target.checked)}
-            className="rounded"
+            className="h-4 w-4 rounded accent-emerald-600"
           />
           Show inactive
         </label>
@@ -197,16 +228,35 @@ export default function FieldConfigBrowser() {
                         onEdit={() => setEditingId(field.id)}
                         onDelete={async () => {
                           if (!confirm(`Deactivate ${field.field_name}? It won't be deleted, just skipped at run time.`)) return;
-                          await fetch(`/api/data-entry/fields/${field.id}`, { method: 'DELETE' });
-                          load();
+                          setActionError(null);
+                          try {
+                            const res = await fetch(`/api/data-entry/fields/${field.id}`, { method: 'DELETE' });
+                            if (!res.ok) {
+                              const body = await res.json().catch(() => ({}));
+                              throw new Error(body.error ?? `Disable failed (${res.status})`);
+                            }
+                            load();
+                          } catch (e) {
+                            setActionError(e instanceof Error ? e.message : 'Disable failed');
+                          }
                         }}
                         onReactivate={async () => {
-                          await fetch(`/api/data-entry/fields/${field.id}`, {
-                            method: 'PUT',
-                            headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify({ isActive: true }),
-                          });
-                          load();
+                          if (!confirm(`Reactivate ${field.field_name}? It will be extracted again on the next run.`)) return;
+                          setActionError(null);
+                          try {
+                            const res = await fetch(`/api/data-entry/fields/${field.id}`, {
+                              method: 'PUT',
+                              headers: { 'Content-Type': 'application/json' },
+                              body: JSON.stringify({ isActive: true }),
+                            });
+                            if (!res.ok) {
+                              const body = await res.json().catch(() => ({}));
+                              throw new Error(body.error ?? `Reactivate failed (${res.status})`);
+                            }
+                            load();
+                          } catch (e) {
+                            setActionError(e instanceof Error ? e.message : 'Reactivate failed');
+                          }
                         }}
                       />
                     )
@@ -218,7 +268,7 @@ export default function FieldConfigBrowser() {
         );
       })}
 
-      {grouped.size === 0 && (
+      {!loadError && grouped.size === 0 && (
         <p className="py-8 text-center text-sm text-muted-foreground">No fields match the current filters.</p>
       )}
     </div>
@@ -270,7 +320,7 @@ function FieldRow({
         <button
           onClick={onEdit}
           type="button"
-          className="text-xs text-blue-600 hover:underline mr-3"
+          className="text-xs text-blue-600 hover:underline mr-3 rounded focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-200"
         >
           Edit
         </button>
@@ -278,7 +328,7 @@ function FieldRow({
           <button
             onClick={onDelete}
             type="button"
-            className="text-xs text-destructive hover:underline"
+            className="text-xs text-destructive hover:underline rounded focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-200"
           >
             Disable
           </button>
@@ -286,7 +336,7 @@ function FieldRow({
           <button
             onClick={onReactivate}
             type="button"
-            className="text-xs text-green-700 hover:underline"
+            className="text-xs text-emerald-700 hover:underline rounded focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-200"
           >
             Enable
           </button>
@@ -326,7 +376,21 @@ function FieldForm({
   const needsOptions = valueType === 'picklist' || valueType === 'multipicklist';
   const isEdit = !!existing;
 
+  // Client-side validation for NEW fields (config_id + SF field name format).
+  const configIdError = !isEdit && configId.length > 0 && !CONFIG_ID_RE.test(configId)
+    ? 'Must be lowercase_snake_case (start with a letter).'
+    : null;
+  const fieldNameError = !isEdit && fieldName.length > 0 && !FIELD_NAME_RE.test(fieldName)
+    ? 'Custom field API name must end with __c.'
+    : null;
+  const newFieldValid = isEdit
+    || (CONFIG_ID_RE.test(configId) && FIELD_NAME_RE.test(fieldName));
+
   async function handleSave() {
+    if (!newFieldValid) {
+      setError('Fix the highlighted fields before saving.');
+      return;
+    }
     setSaving(true);
     setError(null);
 
@@ -381,24 +445,30 @@ function FieldForm({
       {!isEdit && (
         <div className="grid grid-cols-2 gap-3">
           <div>
-            <label className="block text-xs text-muted-foreground mb-1">Config ID (lowercase_snake_case)</label>
+            <label htmlFor="field-config-id" className="block text-xs text-muted-foreground mb-1">Config ID (lowercase_snake_case)</label>
             <input
+              id="field-config-id"
               type="text"
               value={configId}
               onChange={(e) => setConfigId(e.target.value)}
               placeholder="custom_buyer_preference"
-              className="w-full rounded-xl border bg-background px-3 py-2 text-sm transition focus:outline-none focus:ring-2 focus:ring-emerald-200 font-mono"
+              aria-invalid={configIdError ? true : undefined}
+              className={`w-full rounded-lg border bg-background px-3 py-2 text-sm transition focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-200 font-mono ${configIdError ? 'border-destructive' : ''}`}
             />
+            {configIdError && <p className="mt-1 text-xs text-destructive">{configIdError}</p>}
           </div>
           <div>
-            <label className="block text-xs text-muted-foreground mb-1">SF Field Name (must end with __c)</label>
+            <label htmlFor="field-sf-name" className="block text-xs text-muted-foreground mb-1">SF Field Name (must end with __c)</label>
             <input
+              id="field-sf-name"
               type="text"
               value={fieldName}
               onChange={(e) => setFieldName(e.target.value)}
               placeholder="AI_Custom_Field__c"
-              className="w-full rounded-xl border bg-background px-3 py-2 text-sm transition focus:outline-none focus:ring-2 focus:ring-emerald-200 font-mono"
+              aria-invalid={fieldNameError ? true : undefined}
+              className={`w-full rounded-lg border bg-background px-3 py-2 text-sm transition focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-200 font-mono ${fieldNameError ? 'border-destructive' : ''}`}
             />
+            {fieldNameError && <p className="mt-1 text-xs text-destructive">{fieldNameError}</p>}
           </div>
         </div>
       )}
@@ -410,7 +480,7 @@ function FieldForm({
             <select
               value={sfObject}
               onChange={(e) => setSfObject(e.target.value as 'Lead' | 'Opportunity')}
-              className="w-full rounded-xl border bg-background px-3 py-2 text-sm transition focus:outline-none focus:ring-2 focus:ring-emerald-200"
+              className="w-full rounded-lg border bg-background px-3 py-2 text-sm transition focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-200"
             >
               <option value="Lead">Lead</option>
               <option value="Opportunity">Opportunity</option>
@@ -422,7 +492,7 @@ function FieldForm({
           <select
             value={valueType}
             onChange={(e) => setValueType(e.target.value)}
-            className="w-full rounded-xl border bg-background px-3 py-2 text-sm transition focus:outline-none focus:ring-2 focus:ring-emerald-200"
+            className="w-full rounded-lg border bg-background px-3 py-2 text-sm transition focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-200"
           >
             {VALUE_TYPES.map((t) => <option key={t} value={t}>{t}</option>)}
           </select>
@@ -432,7 +502,7 @@ function FieldForm({
           <select
             value={batchId}
             onChange={(e) => setBatchId(e.target.value)}
-            className="w-full rounded-xl border bg-background px-3 py-2 text-sm transition focus:outline-none focus:ring-2 focus:ring-emerald-200"
+            className="w-full rounded-lg border bg-background px-3 py-2 text-sm transition focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-200"
           >
             {batches.map((b) => <option key={b.batchId} value={b.batchId}>{b.batchId}</option>)}
           </select>
@@ -442,7 +512,7 @@ function FieldForm({
           <select
             value={writeMode}
             onChange={(e) => setWriteMode(e.target.value)}
-            className="w-full rounded-xl border bg-background px-3 py-2 text-sm transition focus:outline-none focus:ring-2 focus:ring-emerald-200"
+            className="w-full rounded-lg border bg-background px-3 py-2 text-sm transition focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-200"
           >
             {WRITE_MODES.map((w) => <option key={w} value={w}>{w}</option>)}
           </select>
@@ -457,7 +527,7 @@ function FieldForm({
           value={instruction}
           onChange={(e) => setInstruction(e.target.value)}
           rows={4}
-          className="w-full rounded-xl border bg-background px-3 py-2 text-sm transition focus:outline-none focus:ring-2 focus:ring-emerald-200"
+          className="w-full rounded-lg border bg-background px-3 py-2 text-sm transition focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-200"
           placeholder="e.g. Determine the buyer persona. Is this person a Property Owner..."
         />
       </div>
@@ -471,7 +541,7 @@ function FieldForm({
             value={optionsText}
             onChange={(e) => setOptionsText(e.target.value)}
             rows={6}
-            className="w-full rounded-xl border bg-background px-3 py-2 text-sm transition focus:outline-none focus:ring-2 focus:ring-emerald-200 font-mono"
+            className="w-full rounded-lg border bg-background px-3 py-2 text-sm transition focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-200 font-mono"
             placeholder="Option 1&#10;Option 2&#10;Option 3"
           />
         </div>
@@ -485,7 +555,7 @@ function FieldForm({
               type="number"
               value={maxLength}
               onChange={(e) => setMaxLength(e.target.value)}
-              className="w-full rounded-xl border bg-background px-3 py-2 text-sm transition focus:outline-none focus:ring-2 focus:ring-emerald-200"
+              className="w-full rounded-lg border bg-background px-3 py-2 text-sm transition focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-200"
             />
           </div>
         )}
@@ -494,12 +564,12 @@ function FieldForm({
             <div>
               <label className="block text-xs text-muted-foreground mb-1">Min</label>
               <input type="number" value={minVal} onChange={(e) => setMinVal(e.target.value)}
-                className="w-full rounded-xl border bg-background px-3 py-2 text-sm transition focus:outline-none focus:ring-2 focus:ring-emerald-200" />
+                className="w-full rounded-lg border bg-background px-3 py-2 text-sm transition focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-200" />
             </div>
             <div>
               <label className="block text-xs text-muted-foreground mb-1">Max</label>
               <input type="number" value={maxVal} onChange={(e) => setMaxVal(e.target.value)}
-                className="w-full rounded-xl border bg-background px-3 py-2 text-sm transition focus:outline-none focus:ring-2 focus:ring-emerald-200" />
+                className="w-full rounded-lg border bg-background px-3 py-2 text-sm transition focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-200" />
             </div>
           </>
         )}

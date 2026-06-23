@@ -33,20 +33,6 @@ export type RunListItem = {
   created_at: string;
 };
 
-export type PhaseTimingRow = {
-  phase: string;
-  durationMs: number;
-};
-
-export type BatchExecutionRow = {
-  batchId: string;
-  durationMs: number;
-  promptTokens: number;
-  completionTokens: number;
-  status: 'success' | 'error';
-  error?: string;
-};
-
 export type ExtractionRow = {
   id: string;
   field_name: string;
@@ -59,6 +45,7 @@ export type ExtractionRow = {
   confidence: number | null;
   evidence: string | null;
   was_written: boolean;
+  write_outcome: string | null;
   skip_reason: string | null;
   validation_errors: string[] | null;
   created_at: string;
@@ -71,13 +58,6 @@ export type WriteResultRow = {
   fieldsVerifiedWritten: number;
   silentlyDropped: number;
   error: string | null;
-};
-
-export type FetchInventoryRow = {
-  source: string;
-  status: 'ok' | 'empty' | 'error';
-  count: number;
-  error?: string;
 };
 
 export type QueueItem = {
@@ -99,11 +79,3 @@ export type QueueItem = {
 export type HistoryRow =
   | { kind: 'batch'; data: BatchListItem }
   | { kind: 'queued'; data: QueueItem };
-
-export type StreamEvent =
-  | { type: 'phase'; phase: string; status: string }
-  | { type: 'fetch_result'; source: string; ok: boolean; error?: string }
-  | { type: 'extraction'; fieldName: string; value: string | null; confidence: number; wasWritten: boolean }
-  | { type: 'done'; runId: string; summary: { extracted: number; written: number; skipped: number; errored: number } }
-  | { type: 'error'; error: string }
-  | { type: 'result'; runId: string; status: string; [key: string]: unknown };

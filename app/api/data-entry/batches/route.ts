@@ -14,6 +14,7 @@ import { NextResponse } from 'next/server';
 import { createServiceClient } from '@/lib/supabase/server';
 import { getAuthContext } from '@/lib/auth';
 import { AGENT_REF, jsonError, mapRun } from '@/lib/revops/mappers';
+import { withRevops } from '@/lib/revops/with-revops';
 
 export const runtime = 'nodejs';
 
@@ -41,9 +42,8 @@ function mapRunToBatch(row: Record<string, unknown>) {
   };
 }
 
-export async function GET(request: Request) {
+export const GET = withRevops(async (request: Request) => {
   const ctx = await getAuthContext();
-  if (!ctx) return jsonError('Unauthorized', 401, 'UNAUTHORIZED');
   if (!ctx.permissions.modules.data_entry.access) {
     return jsonError('Forbidden', 403, 'FORBIDDEN');
   }
@@ -68,10 +68,11 @@ export async function GET(request: Request) {
   const { data, error } = await query;
 
   if (error) {
-    return jsonError(error.message, 500, 'QUERY_FAILED');
+    console.error('[batches GET] query error:', error.code, error.message);
+    return jsonError('Failed to load run history', 500, 'QUERY_FAILED');
   }
 
   const batches = ((data ?? []) as Record<string, unknown>[]).map(mapRunToBatch);
 
   return NextResponse.json({ batches });
-}
+});

@@ -19,13 +19,14 @@ import {
   mergePromptVersions,
   type PromptSlotRow,
 } from '@/lib/revops/mappers';
+import { withRevops, mapDbWriteError } from '@/lib/revops/with-revops';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
 const SLOT_COLUMNS = 'id, slot, version, body, is_active, notes, created_at';
 
-export async function GET() {
+export const GET = withRevops(async () => {
   const ctx = await getAuthContext();
   if (!ctx.permissions.modules.data_entry.access) {
     return jsonError('Forbidden', 403, 'FORBIDDEN');
@@ -40,7 +41,8 @@ export async function GET() {
     .order('version', { ascending: false });
 
   if (error) {
-    return jsonError(error.message, 500, 'QUERY_FAILED');
+    console.error('[prompts GET] query error:', error.code, error.message);
+    return jsonError('Failed to load prompt versions', 500, 'QUERY_FAILED');
   }
 
   const rows = (data ?? []) as PromptSlotRow[];
@@ -51,7 +53,7 @@ export async function GET() {
     active,
     history: versions,
   });
-}
+});
 
 const createSchema = z.object({
   // The live PromptEditor client sends camelCase; the task spec names them in
@@ -63,7 +65,7 @@ const createSchema = z.object({
   notes: z.string().max(2000).optional(),
 });
 
-export async function POST(request: Request) {
+export const POST = withRevops(async (request: Request) => {
   // Gate on capability, not identity presence (single-tenant editor has no email).
   const ctx = await getAuthContext();
   if (!ctx.permissions.modules.data_entry.can_edit_prompts) {
@@ -103,7 +105,8 @@ export async function POST(request: Request) {
     .maybeSingle();
 
   if (maxErr) {
-    return jsonError(maxErr.message, 500, 'QUERY_FAILED');
+    console.error('[prompts POST] version lookup error:', maxErr.code, maxErr.message);
+    return jsonError('Failed to compute the next prompt version', 500, 'QUERY_FAILED');
   }
 
   const nextVersion = ((maxRow?.version as number | undefined) ?? 0) + 1;
@@ -121,7 +124,8 @@ export async function POST(request: Request) {
     .eq('is_active', true);
 
   if (deactErr) {
-    return jsonError(deactErr.message, 500, 'DEACTIVATE_FAILED');
+    console.error('[prompts POST] deactivate error:', deactErr.code, deactErr.message);
+    return jsonError('Failed to deactivate the previous prompt version', 500, 'DEACTIVATE_FAILED');
   }
 
   // Insert the new system + extraction pair, both active.
@@ -150,11 +154,16 @@ export async function POST(request: Request) {
     .select(SLOT_COLUMNS);
 
   if (insertErr) {
-    return jsonError(insertErr.message, 500, 'CREATE_FAILED');
+    return mapDbWriteError(
+      insertErr,
+      'A prompt version with that number already exists',
+      'Failed to create the prompt version',
+      'CREATE_FAILED',
+    );
   }
 
   const newRows = (inserted ?? []) as PromptSlotRow[];
   const [prompt] = mergePromptVersions(newRows);
 
   return NextResponse.json({ prompt }, { status: 201 });
-}
+});

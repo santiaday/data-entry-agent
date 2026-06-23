@@ -15,36 +15,24 @@
  *
  * Values are bound as parameters. Column types are introspected once per table
  * (cached) so JS objects/arrays are encoded correctly for `jsonb` vs `text[]`.
+ *
+ * The builder is driven by an injected `Queryable` executor — in this
+ * deployment that is the remote `/db/{database}/sql` exec (see
+ * lib/revops/sql-client.ts), not a direct Postgres connection.
  */
 
-import { Pool, type PoolClient } from 'pg';
+// ── Executor contract ───────────────────────────────────────────
 
-// ── Connection pool (singleton) ─────────────────────────────────
+/**
+ * Minimal query executor the builder depends on. Any backend that runs
+ * parameterized SQL and returns `{ rows, rowCount }` satisfies it — the
+ * node-postgres `QueryResult` shape and the revops remote exec both do.
+ */
+type QueryResult = { rows: unknown[]; rowCount: number | null };
 
-let pool: Pool | null = null;
-
-function isLocal(connectionString: string): boolean {
-  return /@(localhost|127\.0\.0\.1|\[::1\])[:/]/.test(connectionString);
-}
-
-export function getPool(): Pool {
-  if (pool) return pool;
-  const connectionString = process.env.DATABASE_URL;
-  if (!connectionString) {
-    throw new Error('DATABASE_URL is not set');
-  }
-  // Managed Postgres (e.g. RDS) requires TLS but typically presents a cert
-  // chain we do not pin — mirror the `sslmode=no-verify` semantics. Local
-  // databases run without TLS.
-  const disableSsl =
-    isLocal(connectionString) || /sslmode=disable/.test(connectionString);
-  pool = new Pool({
-    connectionString,
-    ssl: disableSsl ? false : { rejectUnauthorized: false },
-    max: 10,
-  });
-  return pool;
-}
+type Queryable = {
+  query(sql: string, params?: unknown[]): Promise<QueryResult>;
+};
 
 // ── Column-type introspection (per table, cached) ───────────────
 
@@ -124,8 +112,6 @@ function splitTable(name: string): { schema: string; table: string } {
 
 // ── Types ───────────────────────────────────────────────────────
 
-type Queryable = Pick<PoolClient, 'query'> | Pool;
-
 type Filter = {
   op: 'eq' | 'neq' | 'in' | 'gt' | 'gte' | 'lt' | 'lte' | 'like' | 'ilike' | 'is';
   column: string;
@@ -152,6 +138,12 @@ const OP_SQL: Record<Filter['op'], string> = {
   is: 'IS',
   in: 'IN',
 };
+
+/** Read the `count` aggregate from a `SELECT count(*)::int AS count` result. */
+function readCount(rows: unknown[]): number {
+  const first = rows[0] as { count?: number } | undefined;
+  return first?.count ?? 0;
+}
 
 // ── Query builder ───────────────────────────────────────────────
 
@@ -367,7 +359,7 @@ class PgQuery implements PromiseLike<PostgrestResult> {
         `SELECT count(*)::int AS count FROM ${qIdent(this.table)}${where}`,
         params,
       );
-      return { data: null, error: null, count: res.rows[0]?.count ?? 0 };
+      return { data: null, error: null, count: readCount(res.rows) };
     }
 
     const cols = this.selectColumns === '*' ? '*' : this.selectColumnList();
@@ -382,7 +374,7 @@ class PgQuery implements PromiseLike<PostgrestResult> {
         `SELECT count(*)::int AS count FROM ${qIdent(this.table)}${cWhere}`,
         cParams,
       );
-      count = cRes.rows[0]?.count ?? 0;
+      count = readCount(cRes.rows);
     }
     return this.shapeRows(res.rows, count);
   }
@@ -498,13 +490,8 @@ class PgQuery implements PromiseLike<PostgrestResult> {
 // ── Client surface ──────────────────────────────────────────────
 
 export class PgRestClient {
-  constructor(private exec: Queryable = getPool()) {}
+  constructor(private exec: Queryable) {}
   from(table: string): PgQuery {
     return new PgQuery(this.exec, table);
   }
-}
-
-/** Construct a client. Cast to the Supabase client type at the call boundary. */
-export function createPgRestClient(): PgRestClient {
-  return new PgRestClient(getPool());
 }

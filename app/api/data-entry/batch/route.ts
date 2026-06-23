@@ -16,6 +16,7 @@ import { z } from 'zod';
 import { getAuthContext } from '@/lib/auth';
 import { createServiceClient } from '@/lib/supabase/server';
 import { AGENT_REF, jsonError } from '@/lib/revops/mappers';
+import { withRevops, mapDbWriteError } from '@/lib/revops/with-revops';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -35,7 +36,7 @@ const requestSchema = z.object({
 
 const HARD_CAP = 1000; // absolute upper bound on a single enqueue request
 
-export async function POST(request: Request) {
+export const POST = withRevops(async (request: Request) => {
   // Gate on capability, NOT identity presence: in single-tenant mode there is
   // no per-user email but an editor (explicit opt-in) may still run batches.
   const ctx = await getAuthContext();
@@ -101,8 +102,13 @@ export async function POST(request: Request) {
     .select('id');
 
   if (error) {
-    return jsonError(error.message, 500, 'ENQUEUE_FAILED');
+    return mapDbWriteError(
+      error,
+      'One or more of those records is already queued',
+      'Failed to enqueue batch',
+      'ENQUEUE_FAILED',
+    );
   }
 
   return Response.json({ queued: recordIds.length });
-}
+});

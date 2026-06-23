@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState, useCallback, useRef } from 'react';
 
 type PromptRow = {
   id: string;
@@ -19,6 +19,7 @@ export default function PromptEditor() {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [flash, setFlash] = useState<string | null>(null);
 
   // Draft state
@@ -27,27 +28,38 @@ export default function PromptEditor() {
   const [name, setName] = useState('');
   const [notes, setNotes] = useState('');
 
+  const hasChanges =
+    (active && (systemPrompt !== active.system_prompt || userPromptPreamble !== (active.user_prompt_preamble ?? '')))
+    || (!active && systemPrompt.length > 0);
+
+  // Keep the latest dirty state in a ref so load() can dirty-guard without
+  // being re-created on every keystroke.
+  const hasChangesRef = useRef(hasChanges);
+  hasChangesRef.current = hasChanges;
+
   const load = useCallback(() => {
     setLoading(true);
+    setLoadError(null);
     fetch('/api/data-entry/prompts')
-      .then((r) => r.json())
+      .then(async (r) => {
+        const data = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(data?.error ?? `Failed to load prompts (${r.status})`);
+        return data;
+      })
       .then((data) => {
         setActive(data.active ?? null);
         setHistory(data.history ?? []);
-        if (data.active) {
+        // Don't clobber an unsaved draft — only hydrate the editor when clean.
+        if (data.active && !hasChangesRef.current) {
           setSystemPrompt(data.active.system_prompt);
           setUserPromptPreamble(data.active.user_prompt_preamble ?? '');
         }
       })
-      .catch((e) => setError(e.message))
+      .catch((e) => setLoadError(e instanceof Error ? e.message : 'Failed to load prompts'))
       .finally(() => setLoading(false));
   }, []);
 
   useEffect(() => { load(); }, [load]);
-
-  const hasChanges =
-    (active && (systemPrompt !== active.system_prompt || userPromptPreamble !== (active.user_prompt_preamble ?? '')))
-    || (!active && systemPrompt.length > 0);
 
   async function handleSave() {
     setSaving(true);
@@ -122,10 +134,24 @@ export default function PromptEditor() {
         </p>
       </div>
 
+      {loadError && (
+        <div className="rounded-xl border border-destructive/40 bg-destructive/5 p-4">
+          <p className="text-sm font-medium text-destructive">Couldn&apos;t load prompts</p>
+          <p className="mt-1 text-xs text-muted-foreground break-words">{loadError}</p>
+          <button
+            onClick={load}
+            type="button"
+            className="mt-3 rounded-lg border px-3 py-1.5 text-sm font-medium hover:bg-accent transition focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-200"
+          >
+            Retry
+          </button>
+        </div>
+      )}
+
       {active && (
         <div className="flex items-center gap-2 text-sm">
           <span className="text-muted-foreground">Currently active:</span>
-          <span className="inline-flex rounded-full bg-green-100 px-2 py-0.5 text-xs font-medium text-green-800">
+          <span className="inline-flex rounded-full bg-emerald-100 px-2 py-0.5 text-xs font-medium text-emerald-800">
             v{active.version}
           </span>
           {active.name && <span className="text-muted-foreground">· {active.name}</span>}
@@ -147,7 +173,7 @@ export default function PromptEditor() {
           value={systemPrompt}
           onChange={(e) => setSystemPrompt(e.target.value)}
           rows={20}
-          className="w-full rounded-lg border bg-background px-3 py-2 text-sm font-mono leading-relaxed transition focus:outline-none focus:ring-2 focus:ring-emerald-200"
+          className="w-full rounded-lg border bg-background px-3 py-2 text-sm font-mono leading-relaxed transition focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-200"
           placeholder="You are a data extraction assistant..."
         />
 
@@ -161,7 +187,7 @@ export default function PromptEditor() {
           value={userPromptPreamble}
           onChange={(e) => setUserPromptPreamble(e.target.value)}
           rows={4}
-          className="w-full rounded-lg border bg-background px-3 py-2 text-sm font-mono leading-relaxed transition focus:outline-none focus:ring-2 focus:ring-emerald-200"
+          className="w-full rounded-lg border bg-background px-3 py-2 text-sm font-mono leading-relaxed transition focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-200"
           placeholder="(leave empty unless you want extra instructions before the context)"
         />
 
@@ -175,7 +201,7 @@ export default function PromptEditor() {
                 value={name}
                 onChange={(e) => setName(e.target.value)}
                 placeholder="e.g. Tighter grounding on transcripts"
-                className="w-full rounded-lg border bg-background px-3 py-2 text-sm transition focus:outline-none focus:ring-2 focus:ring-emerald-200"
+                className="w-full rounded-lg border bg-background px-3 py-2 text-sm transition focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-200"
               />
             </div>
             <div>
@@ -185,13 +211,13 @@ export default function PromptEditor() {
                 value={notes}
                 onChange={(e) => setNotes(e.target.value)}
                 placeholder="Why this change?"
-                className="w-full rounded-lg border bg-background px-3 py-2 text-sm transition focus:outline-none focus:ring-2 focus:ring-emerald-200"
+                className="w-full rounded-lg border bg-background px-3 py-2 text-sm transition focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-200"
               />
             </div>
           </div>
 
           {error && <p className="text-sm text-destructive">{error}</p>}
-          {flash && <p className="text-sm text-green-700">{flash}</p>}
+          {flash && <p className="text-sm text-emerald-700">{flash}</p>}
 
           <div className="flex items-center justify-between">
             <p className="text-xs text-muted-foreground">
@@ -201,7 +227,7 @@ export default function PromptEditor() {
               onClick={handleSave}
               type="button"
               disabled={saving || !hasChanges || systemPrompt.trim().length < 50}
-              className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-700 disabled:opacity-50 transition"
+              className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-700 disabled:opacity-50 transition focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-200"
             >
               {saving ? 'Saving...' : 'Save as New Version'}
             </button>
@@ -229,7 +255,7 @@ export default function PromptEditor() {
                 <td className="py-2 pr-3 text-muted-foreground">{row.name ?? '—'}</td>
                 <td className="py-2 pr-3">
                   {row.is_active ? (
-                    <span className="inline-flex rounded-full bg-green-100 px-2 py-0.5 text-xs font-medium text-green-800">active</span>
+                    <span className="inline-flex rounded-full bg-emerald-100 px-2 py-0.5 text-xs font-medium text-emerald-800">active</span>
                   ) : (
                     <span className="inline-flex rounded-full bg-gray-100 px-2 py-0.5 text-xs font-medium text-gray-700">inactive</span>
                   )}
@@ -242,7 +268,7 @@ export default function PromptEditor() {
                     <button
                       onClick={() => handleActivate(row.id, row.version)}
                       type="button"
-                      className="text-xs text-blue-600 hover:underline"
+                      className="text-xs text-blue-600 hover:underline rounded focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-200"
                     >
                       Activate
                     </button>
@@ -252,7 +278,7 @@ export default function PromptEditor() {
             ))}
           </tbody>
         </table>
-        {history.length === 0 && (
+        {history.length === 0 && !active && (
           <p className="py-4 text-center text-sm text-muted-foreground">No versions yet.</p>
         )}
       </section>

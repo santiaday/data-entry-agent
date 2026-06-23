@@ -19,17 +19,17 @@ import {
   mergePromptVersions,
   type PromptSlotRow,
 } from '@/lib/revops/mappers';
+import { withRevops, mapDbWriteError } from '@/lib/revops/with-revops';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
-export async function POST(
+export const POST = withRevops(async (
   _request: Request,
   { params }: { params: Promise<{ id: string }> },
-) {
+) => {
   const { id } = await params;
   const ctx = await getAuthContext();
-  if (!ctx) return jsonError('Unauthorized', 401, 'UNAUTHORIZED');
   if (!ctx.permissions.modules.data_entry.can_edit_prompts) {
     return jsonError('Forbidden', 403, 'FORBIDDEN');
   }
@@ -45,7 +45,8 @@ export async function POST(
     .maybeSingle();
 
   if (lookupErr) {
-    return jsonError(lookupErr.message, 500, 'QUERY_FAILED');
+    console.error('[prompts/[id] POST] lookup error:', lookupErr.code, lookupErr.message);
+    return jsonError('Failed to look up the prompt version', 500, 'QUERY_FAILED');
   }
   if (!target) {
     return jsonError('Prompt not found', 404, 'NOT_FOUND');
@@ -60,7 +61,12 @@ export async function POST(
     .eq('agent_ref', AGENT_REF);
 
   if (deactErr) {
-    return jsonError(deactErr.message, 500, 'DEACTIVATE_FAILED');
+    return mapDbWriteError(
+      deactErr,
+      'That prompt version is already active',
+      'Failed to deactivate the previous prompt version',
+      'DEACTIVATE_FAILED',
+    );
   }
 
   // 3. Activate both slots at the resolved version.
@@ -71,7 +77,12 @@ export async function POST(
     .eq('version', version);
 
   if (actErr) {
-    return jsonError(actErr.message, 500, 'ACTIVATE_FAILED');
+    return mapDbWriteError(
+      actErr,
+      'That prompt version is already active',
+      'Failed to activate the prompt version',
+      'ACTIVATE_FAILED',
+    );
   }
 
   // 4. Read back both slot-rows at that version and merge into the UI shape.
@@ -82,7 +93,8 @@ export async function POST(
     .eq('version', version);
 
   if (readErr) {
-    return jsonError(readErr.message, 500, 'QUERY_FAILED');
+    console.error('[prompts/[id] POST] read-back error:', readErr.code, readErr.message);
+    return jsonError('Failed to read back the activated prompt', 500, 'QUERY_FAILED');
   }
 
   const merged = mergePromptVersions((rows ?? []) as PromptSlotRow[]);
@@ -92,4 +104,4 @@ export async function POST(
   }
 
   return NextResponse.json({ prompt });
-}
+});

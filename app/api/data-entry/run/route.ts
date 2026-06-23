@@ -10,6 +10,7 @@ import { z } from 'zod';
 import { getAuthContext } from '@/lib/auth';
 import { createServiceClient } from '@/lib/supabase/server';
 import { AGENT_REF, jsonError } from '@/lib/revops/mappers';
+import { withRevops, mapDbWriteError } from '@/lib/revops/with-revops';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -21,24 +22,22 @@ const requestSchema = z.object({
   fieldGroups: z.array(z.string()).optional(),
 });
 
-export async function POST(request: Request) {
+export const POST = withRevops(async (request: Request) => {
   const ctx = await getAuthContext();
-  if (!ctx) return jsonError('Unauthorized', 401);
-
   const dePerms = ctx.permissions.modules.data_entry;
-  if (!dePerms.access) return jsonError('Forbidden', 403);
-  if (!dePerms.can_run_batches) return jsonError('Forbidden', 403);
+  if (!dePerms.access) return jsonError('Forbidden', 403, 'FORBIDDEN');
+  if (!dePerms.can_run_batches) return jsonError('Forbidden', 403, 'FORBIDDEN');
 
   let body: unknown;
   try {
     body = await request.json();
   } catch {
-    return jsonError('Invalid JSON body', 400);
+    return jsonError('Invalid JSON body', 400, 'INVALID_REQUEST');
   }
 
   const parsed = requestSchema.safeParse(body);
   if (!parsed.success) {
-    return jsonError(`Invalid request: ${parsed.error.message}`, 400);
+    return jsonError(`Invalid request: ${parsed.error.message}`, 400, 'INVALID_REQUEST');
   }
 
   const { recordId, objectType, dryRun, fieldGroups } = parsed.data;
@@ -63,12 +62,17 @@ export async function POST(request: Request) {
     .single();
 
   if (error) {
-    return jsonError(`Failed to enqueue run: ${error.message}`, 500);
+    return mapDbWriteError(
+      error,
+      'That record is already queued',
+      'Failed to enqueue run',
+      'ENQUEUE_FAILED',
+    );
   }
 
   if (!data) {
-    return jsonError('Failed to enqueue run', 500);
+    return jsonError('Failed to enqueue run', 500, 'ENQUEUE_FAILED');
   }
 
   return Response.json({ queued: true, id: data.id, dry_run: dryRun });
-}
+});

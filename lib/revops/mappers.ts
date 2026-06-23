@@ -5,6 +5,22 @@
 
 export const AGENT_REF = process.env.AGENT_REF ?? 'sales/data-entry-agent';
 
+/**
+ * Allowed config.field_definitions.value_type values. Single source of truth so
+ * the create and update field schemas (and the UI) accept the identical set.
+ */
+export const FIELD_VALUE_TYPES = [
+  'picklist',
+  'multipicklist',
+  'text',
+  'textarea',
+  'number',
+  'currency',
+  'date',
+  'datetime',
+  'boolean',
+] as const;
+
 export function jsonError(message: string, status: number, code = 'ERROR') {
   return Response.json({ error: message, code }, { status });
 }
@@ -95,10 +111,13 @@ export function mapQueue(row: Record<string, any>) {
     run_id: row.dispatched_run_id ?? null,
     delay_minutes: 0,
     created_at: row.enqueued_at ?? null,
-    processed_at: row.status === 'dispatched' ? (row.updated_at ?? null) : null,
+    processed_at: TERMINAL_QUEUE_STATUSES.has(row.status) ? (row.updated_at ?? null) : null,
     dry_run: row.dry_run === true,
   };
 }
+
+/** dispatch_queue statuses that represent a completed/finished row. */
+const TERMINAL_QUEUE_STATUSES = new Set(['dispatched', 'failed', 'cancelled', 'dead']);
 
 // ── config.field_definitions → FieldConfig (UI) ───────────────────
 export function mapField(row: Record<string, any>) {

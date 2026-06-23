@@ -50,13 +50,13 @@ function LoginForm() {
           value={password}
           onChange={(e) => setPassword(e.target.value)}
           placeholder="Password"
-          className="w-full rounded-md border bg-background px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-ring"
+          className="w-full rounded-lg border bg-background px-3 py-2 text-sm transition focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-200"
         />
         {error && <p className="text-sm text-destructive">{error}</p>}
         <button
           type="submit"
           disabled={submitting || !password}
-          className="w-full rounded-md bg-primary px-3 py-2 text-sm font-medium text-primary-foreground disabled:opacity-50"
+          className="w-full rounded-lg bg-emerald-600 px-3 py-2 text-sm font-medium text-white transition hover:bg-emerald-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-200 disabled:opacity-50"
         >
           {submitting ? 'Checking…' : 'Continue'}
         </button>
@@ -65,9 +65,24 @@ function LoginForm() {
   );
 }
 
+function LoginSkeleton() {
+  return (
+    <div className="flex min-h-screen items-center justify-center bg-background px-4">
+      <div className="w-full max-w-sm space-y-4 rounded-lg border bg-card p-6 shadow-sm">
+        <div className="space-y-2">
+          <div className="h-5 w-40 animate-pulse rounded bg-muted" />
+          <div className="h-4 w-56 animate-pulse rounded bg-muted" />
+        </div>
+        <div className="h-10 w-full animate-pulse rounded-lg bg-muted" />
+        <div className="h-10 w-full animate-pulse rounded-lg bg-muted" />
+      </div>
+    </div>
+  );
+}
+
 export default function LoginPage() {
   return (
-    <Suspense fallback={null}>
+    <Suspense fallback={<LoginSkeleton />}>
       <LoginForm />
     </Suspense>
   );
