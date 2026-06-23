@@ -1,10 +1,11 @@
 /**
  * GET /api/health — non-sensitive diagnostics.
  *
- * Reports which environment variables the running process can see (as booleans
- * only — never values) and whether Salesforce credentials are resolvable from
- * env. Useful for confirming a deploy picked up its env vars and is running the
- * env-first credential code. Public (listed in middleware PUBLIC_PATHS).
+ * Reports which environment variables the running process can see. Secrets are
+ * booleans only (never values); non-secret config identifiers (the revops SQL
+ * endpoint URL, db key, identity, agent_ref) echo their actual value so a deploy
+ * can be verified at a glance. Useful for confirming a deploy picked up its env
+ * vars. Public (listed in middleware PUBLIC_PATHS).
  */
 import { NextResponse } from 'next/server';
 
@@ -34,8 +35,25 @@ export async function GET() {
     OUTREACH_REFRESH_TOKEN: present('OUTREACH_REFRESH_TOKEN'),
   };
 
+  // revops-backed control panel: the vars that actually drive every
+  // /api/data-entry/* route. Endpoint/db-key/identity are non-secret config
+  // identifiers → safe to echo their VALUES so a deploy can be verified at a
+  // glance; the bearer is a secret → presence boolean only. An EMPTY 500 on
+  // /api/data-entry/* means REVOPS_SQL_ENDPOINT or REVOPS_DB_BEARER is unset here.
+  const revops = {
+    REVOPS_SQL_ENDPOINT: process.env.REVOPS_SQL_ENDPOINT ?? null,
+    REVOPS_DB_NAME: process.env.REVOPS_DB_NAME ?? '(default) agent_platform',
+    REVOPS_DB_IDENTITY: process.env.REVOPS_DB_IDENTITY ?? '(default) data_entry_agent',
+    REVOPS_DB_BEARER_present: present('REVOPS_DB_BEARER'),
+    AGENT_REF: process.env.AGENT_REF ?? '(default) sales/data-entry-agent',
+  };
+
   return NextResponse.json({
     ok: true,
+    // The control panel cannot serve any /api/data-entry/* route unless BOTH
+    // of these are set in the RUNNING process.
+    revopsBackendConfigured: !!(process.env.REVOPS_SQL_ENDPOINT && process.env.REVOPS_DB_BEARER),
+    revops,
     // True when all four SF env vars are set — i.e. the agent will authenticate
     // from env without touching the orgs row.
     salesforceCredentialsFromEnv:
