@@ -2,6 +2,7 @@
 
 import { useEffect, useState, useCallback } from 'react';
 import Link from 'next/link';
+import { apiFetch } from '@/lib/api/client';
 import { StatusBadge, DryRunBadge } from './StatusBadge';
 import type { BatchListItem, QueueItem, HistoryRow } from './types';
 
@@ -47,8 +48,8 @@ export default function DataEntryDashboard() {
     }
 
     Promise.all([
-      fetch(`/api/data-entry/batches?${batchParams}`),
-      fetch('/api/data-entry/queue?limit=100'),
+      apiFetch(`/batches?${batchParams}`),
+      apiFetch('/queue?limit=100'),
     ])
       .then(async ([batchRes, queueRes]) => {
         if (!batchRes.ok || !queueRes.ok) {
@@ -111,7 +112,7 @@ export default function DataEntryDashboard() {
     setProcessingAll(true);
     setProcessAllStatus(null);
     try {
-      const res = await fetch('/api/data-entry/queue/process-ready', { method: 'POST' });
+      const res = await apiFetch('/queue/process-ready', { method: 'POST' });
       const data = await res.json();
       if (!res.ok) {
         setProcessAllStatus(`Error: ${data.error ?? 'Request failed'}`);
@@ -130,7 +131,7 @@ export default function DataEntryDashboard() {
   async function handleProcessNow(queueId: string) {
     setProcessingQueueId(queueId);
     try {
-      const res = await fetch(`/api/data-entry/queue/${queueId}/skip`, { method: 'POST' });
+      const res = await apiFetch(`/queue/${queueId}/skip`, { method: 'POST' });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
         setProcessAllStatus(`Error: ${data.error ?? 'Re-queue failed'}`);
@@ -158,7 +159,7 @@ export default function DataEntryDashboard() {
     setRunStatus(null);
 
     try {
-      const response = await fetch('/api/data-entry/run', {
+      const response = await apiFetch('/run', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ recordId: recordId.trim(), objectType, dryRun }),

@@ -1,6 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useState } from 'react';
+import { apiFetch } from '@/lib/api/client';
 import type { Analytics } from './analytics/types';
 import { HeaderKpis } from './analytics/HeaderKpis';
 import { FieldHealthTable, type FieldChip } from './analytics/FieldHealthTable';
@@ -32,7 +33,7 @@ export default function AnalyticsView() {
     setError(null);
     const params = new URLSearchParams({ days: String(days) });
     if (objectType !== 'all') params.set('objectType', objectType);
-    fetch(`/api/data-entry/analytics?${params}`)
+    apiFetch(`/analytics?${params}`)
       .then(async (r) => {
         const data = await r.json().catch(() => ({}));
         if (!r.ok || !data || !data.kpis) {

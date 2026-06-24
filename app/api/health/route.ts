@@ -2,10 +2,15 @@
  * GET /api/health — non-sensitive diagnostics.
  *
  * Reports which environment variables the running process can see. Secrets are
- * booleans only (never values); non-secret config identifiers (the revops SQL
- * endpoint URL, db key, identity, agent_ref) echo their actual value so a deploy
- * can be verified at a glance. Useful for confirming a deploy picked up its env
- * vars. Public (listed in middleware PUBLIC_PATHS).
+ * booleans only (never values); non-secret config identifiers (the data-entry
+ * Lambda API base URL) echo their actual value so a deploy can be verified at a
+ * glance. Useful for confirming a deploy picked up its env vars. Public (listed
+ * in middleware PUBLIC_PATHS).
+ *
+ * The control panel no longer talks to the revops SQL endpoint directly — every
+ * former /api/data-entry/* route is served by the revops-agents Lambda, reached
+ * via NEXT_PUBLIC_DATA_ENTRY_API_BASE with the NEXT_PUBLIC_DATA_ENTRY_API_TOKEN
+ * bearer. Those are the vars that now gate the whole panel.
  */
 import { NextResponse } from 'next/server';
 
@@ -35,25 +40,23 @@ export async function GET() {
     OUTREACH_REFRESH_TOKEN: present('OUTREACH_REFRESH_TOKEN'),
   };
 
-  // revops-backed control panel: the vars that actually drive every
-  // /api/data-entry/* route. Endpoint/db-key/identity are non-secret config
-  // identifiers → safe to echo their VALUES so a deploy can be verified at a
-  // glance; the bearer is a secret → presence boolean only. An EMPTY 500 on
-  // /api/data-entry/* means REVOPS_SQL_ENDPOINT or REVOPS_DB_BEARER is unset here.
-  const revops = {
-    REVOPS_SQL_ENDPOINT: process.env.REVOPS_SQL_ENDPOINT ?? null,
-    REVOPS_DB_NAME: process.env.REVOPS_DB_NAME ?? '(default) agent_platform',
-    REVOPS_DB_IDENTITY: process.env.REVOPS_DB_IDENTITY ?? '(default) data_entry_agent',
-    REVOPS_DB_BEARER_present: present('REVOPS_DB_BEARER'),
-    AGENT_REF: process.env.AGENT_REF ?? '(default) sales/data-entry-agent',
+  // The data-entry control panel now calls the revops-agents Lambda API. The
+  // base URL is a non-secret config identifier → safe to echo its VALUE so a
+  // deploy can be verified at a glance; the bearer is a secret → presence
+  // boolean only. A failing data-entry page means one of these is unset here.
+  const dataEntryApi = {
+    NEXT_PUBLIC_DATA_ENTRY_API_BASE: process.env.NEXT_PUBLIC_DATA_ENTRY_API_BASE ?? null,
+    NEXT_PUBLIC_DATA_ENTRY_API_TOKEN_present: present('NEXT_PUBLIC_DATA_ENTRY_API_TOKEN'),
   };
 
   return NextResponse.json({
     ok: true,
-    // The control panel cannot serve any /api/data-entry/* route unless BOTH
-    // of these are set in the RUNNING process.
-    revopsBackendConfigured: !!(process.env.REVOPS_SQL_ENDPOINT && process.env.REVOPS_DB_BEARER),
-    revops,
+    // The control panel cannot reach the data-entry API unless BOTH of these
+    // are set in the RUNNING process.
+    dataEntryApiConfigured: !!(
+      process.env.NEXT_PUBLIC_DATA_ENTRY_API_BASE && process.env.NEXT_PUBLIC_DATA_ENTRY_API_TOKEN
+    ),
+    dataEntryApi,
     // True when all four SF env vars are set — i.e. the agent will authenticate
     // from env without touching the orgs row.
     salesforceCredentialsFromEnv:

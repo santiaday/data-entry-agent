@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useState, useCallback, useRef } from 'react';
+import { apiFetch } from '@/lib/api/client';
 
 type PromptRow = {
   id: string;
@@ -40,7 +41,7 @@ export default function PromptEditor() {
   const load = useCallback(() => {
     setLoading(true);
     setLoadError(null);
-    fetch('/api/data-entry/prompts')
+    apiFetch('/prompts')
       .then(async (r) => {
         const data = await r.json().catch(() => ({}));
         if (!r.ok) throw new Error(data?.error ?? `Failed to load prompts (${r.status})`);
@@ -67,7 +68,7 @@ export default function PromptEditor() {
     setFlash(null);
 
     try {
-      const response = await fetch('/api/data-entry/prompts', {
+      const response = await apiFetch('/prompts', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -99,7 +100,7 @@ export default function PromptEditor() {
     if (!confirm(`Activate version ${version}? The currently active version will be deactivated (but preserved in history).`)) return;
 
     try {
-      const response = await fetch(`/api/data-entry/prompts/${promptId}`, {
+      const response = await apiFetch(`/prompts/${promptId}`, {
         method: 'POST',
       });
       const data = await response.json();
