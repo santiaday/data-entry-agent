@@ -190,7 +190,9 @@ export const GET = withRevops(async (request: Request) => {
   if (objectType) {
     feParams.push(objectType);
     feScope += ` AND fe.sf_object = $3`;
-    arScope += ` AND ar.subject_kind = $3`;
+    // subject_kind is stored lower-cased ('lead'/'opportunity'); objectType is
+    // 'Lead'/'Opportunity' → compare case-insensitively so the object filter works.
+    arScope += ` AND lower(ar.subject_kind) = lower($3)`;
   }
 
   // config.field_definitions has no time window, so its params drop $2:
@@ -379,7 +381,7 @@ export const GET = withRevops(async (request: Request) => {
                 EXTRACT(EPOCH FROM (now() - ar.started_at))::bigint AS age_seconds
            FROM runs.agent_runs ar
           WHERE ar.agent_ref = $1
-            AND ar.status IN ('pending','running','sleeping','awaiting_transcript','awaiting_settle')
+            AND ar.status::text IN ('pending','running','sleeping','awaiting_reply','awaiting_subagents','awaiting_approval')
             AND ar.started_at < now() - interval '6 hours'
           ORDER BY ar.started_at ASC
           LIMIT 25`,

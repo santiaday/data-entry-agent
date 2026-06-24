@@ -64,7 +64,7 @@ export const GET = withRevops(async (request: Request) => {
       const extractionRows = await revopsQuery<ExtractionRollupRow>(
         `SELECT fe.run_id, fe.write_outcome, fe.dry_run
            FROM runs.field_extractions fe
-          WHERE fe.agent_ref = $1 AND fe.run_id = ANY($2)`,
+          WHERE fe.agent_ref = $1 AND fe.run_id::text = ANY($2)`,
         [AGENT_REF, runIds],
       );
       const grouped = new Map<string, ExtractionRollupRow[]>();
