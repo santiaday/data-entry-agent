@@ -44,18 +44,23 @@ export async function GET() {
   // base URL is a non-secret config identifier → safe to echo its VALUE so a
   // deploy can be verified at a glance; the bearer is a secret → presence
   // boolean only. A failing data-entry page means one of these is unset here.
+  // Runtime config (read here at request time — NOT build-time NEXT_PUBLIC_*).
+  // Base falls back to a hardcoded default in lib/api/client.ts, so only the
+  // token must be set in the running environment for the panel to work. Legacy
+  // NEXT_PUBLIC_* names are still honored.
+  const apiBase =
+    process.env.DATA_ENTRY_API_BASE ?? process.env.NEXT_PUBLIC_DATA_ENTRY_API_BASE ?? null;
+  const tokenPresent =
+    present('DATA_ENTRY_API_TOKEN') || present('NEXT_PUBLIC_DATA_ENTRY_API_TOKEN');
   const dataEntryApi = {
-    NEXT_PUBLIC_DATA_ENTRY_API_BASE: process.env.NEXT_PUBLIC_DATA_ENTRY_API_BASE ?? null,
-    NEXT_PUBLIC_DATA_ENTRY_API_TOKEN_present: present('NEXT_PUBLIC_DATA_ENTRY_API_TOKEN'),
+    DATA_ENTRY_API_BASE: apiBase, // null → client uses its hardcoded default
+    DATA_ENTRY_API_TOKEN_present: tokenPresent,
   };
 
   return NextResponse.json({
     ok: true,
-    // The control panel cannot reach the data-entry API unless BOTH of these
-    // are set in the RUNNING process.
-    dataEntryApiConfigured: !!(
-      process.env.NEXT_PUBLIC_DATA_ENTRY_API_BASE && process.env.NEXT_PUBLIC_DATA_ENTRY_API_TOKEN
-    ),
+    // The token is the only required runtime var (base has a hardcoded default).
+    dataEntryApiConfigured: tokenPresent,
     dataEntryApi,
     // True when all four SF env vars are set — i.e. the agent will authenticate
     // from env without touching the orgs row.

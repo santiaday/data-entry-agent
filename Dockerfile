@@ -13,8 +13,11 @@ WORKDIR /app
 RUN corepack enable
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
-# NEXT_PUBLIC_* are read at runtime by server code only (no browser usage),
-# so the build does not require any secrets.
+# No build-time app config is needed: the data-entry API base is hardcoded
+# (lib/api/client.ts) and the bearer is injected at RUNTIME by the server layout
+# from the container env (DATA_ENTRY_API_TOKEN). Deliberately NOT using
+# NEXT_PUBLIC_* — those would be inlined here at build time, where deploy-time
+# env is unavailable, so they could never reach the browser.
 ENV NEXT_TELEMETRY_DISABLED=1
 RUN pnpm build
 
