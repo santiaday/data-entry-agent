@@ -33,7 +33,12 @@ export default async function RunDetailPage({
 
   const rawExtractions = (extractionsRes.data ?? []) as Record<string, unknown>[];
   const extractions = rawExtractions.map((r) => mapExtraction(r));
-  const counts = extractionCounts(rawExtractions as Array<{ write_outcome?: string | null }>);
+  // counts.dryRun is the authoritative per-run dry_run, derived from these rows
+  // (bool_or(dry_run) / write_outcome='dry_run') — mapRun reads it via counts so
+  // Salesforce-triggered runs (whose payload has no dry_run key) label correctly.
+  const counts = extractionCounts(
+    rawExtractions as Array<{ write_outcome?: string | null; dry_run?: boolean | null }>,
+  );
 
   // Per-group summary for the batch filter/summary in the view.
   const batchSummary: Record<string, { total: number; written: number; skipped: number; errored: number }> = {};

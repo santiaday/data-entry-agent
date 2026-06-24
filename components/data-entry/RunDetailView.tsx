@@ -60,18 +60,21 @@ export default function RunDetailView({
             {run.dry_run && <DryRunBadge />}
           </div>
           <p className="mt-1 text-sm text-muted-foreground">
-            {run.object_type} <span className="font-mono">{run.record_id}</span>
+            {run.object_type}
+            {run.record_id && <span className="ml-1 font-mono">{run.record_id}</span>}
             {run.duration_ms ? ` — ${(run.duration_ms / 1000).toFixed(1)}s` : ''}
           </p>
         </div>
-        <div className="flex items-center gap-3 text-sm">
-          <Link
-            href={`/data-entry/search?recordId=${encodeURIComponent(run.record_id)}`}
-            className="text-muted-foreground hover:text-foreground transition focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-200 rounded"
-          >
-            All runs for this record
-          </Link>
-        </div>
+        {run.record_id && (
+          <div className="flex items-center gap-3 text-sm">
+            <Link
+              href={`/data-entry/search?recordId=${encodeURIComponent(run.record_id)}`}
+              className="text-muted-foreground hover:text-foreground transition focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-200 rounded"
+            >
+              All runs for this record
+            </Link>
+          </div>
+        )}
       </div>
 
       {/* ── Run-level error (prominent when present) ─── */}

@@ -13,16 +13,26 @@
 import { NextResponse } from 'next/server';
 import { createServiceClient } from '@/lib/supabase/server';
 import { getAuthContext } from '@/lib/auth';
-import { AGENT_REF, jsonError, mapRun } from '@/lib/revops/mappers';
+import { AGENT_REF, jsonError, mapRun, extractionCounts } from '@/lib/revops/mappers';
+import { revopsQuery, RemoteSqlError } from '@/lib/revops/sql-client';
 import { withRevops } from '@/lib/revops/with-revops';
 
 export const runtime = 'nodejs';
 
 const MAX_RUNS = 50;
 
+type ExtractionRollupRow = {
+  run_id: string;
+  write_outcome: string | null;
+  dry_run: boolean | null;
+};
+
 /** Map a runs.agent_runs row into the BatchListItem shape the dashboard renders. */
-function mapRunToBatch(row: Record<string, unknown>) {
-  const run = mapRun(row);
+function mapRunToBatch(
+  row: Record<string, unknown>,
+  counts?: ReturnType<typeof extractionCounts>,
+) {
+  const run = mapRun(row, counts);
   const isFailed = run.status === 'failed';
   const isComplete = run.status === 'completed';
   return {
@@ -72,7 +82,42 @@ export const GET = withRevops(async (request: Request) => {
     return jsonError('Failed to load run history', 500, 'QUERY_FAILED');
   }
 
-  const batches = ((data ?? []) as Record<string, unknown>[]).map(mapRunToBatch);
+  const runRows = (data ?? []) as Record<string, unknown>[];
+  const runIds = runRows
+    .map((r) => r.run_id)
+    .filter((id): id is string => typeof id === 'string' && id.length > 0);
+
+  // Roll up field_extractions per run so the history list reports real field
+  // counts and the authoritative dry_run flag (Salesforce-triggered runs carry
+  // no dry_run key in trigger_payload, so reading it alone mislabels them LIVE).
+  const countsByRun = new Map<string, ReturnType<typeof extractionCounts>>();
+  if (runIds.length > 0) {
+    try {
+      const extractionRows = await revopsQuery<ExtractionRollupRow>(
+        `SELECT fe.run_id, fe.write_outcome, fe.dry_run
+           FROM runs.field_extractions fe
+          WHERE fe.agent_ref = $1 AND fe.run_id = ANY($2)`,
+        [AGENT_REF, runIds],
+      );
+      const grouped = new Map<string, ExtractionRollupRow[]>();
+      for (const eRow of extractionRows) {
+        const existing = grouped.get(eRow.run_id);
+        if (existing) existing.push(eRow);
+        else grouped.set(eRow.run_id, [eRow]);
+      }
+      for (const [runId, rows] of grouped) {
+        countsByRun.set(runId, extractionCounts(rows));
+      }
+    } catch (e) {
+      // Best-effort enrichment: never fail the history list over a rollup error.
+      const detail = e instanceof RemoteSqlError ? `${e.code ?? ''} ${e.message}` : String(e);
+      console.error('[batches GET] extraction rollup failed:', detail);
+    }
+  }
+
+  const batches = runRows.map((row) =>
+    mapRunToBatch(row, countsByRun.get(row.run_id as string)),
+  );
 
   return NextResponse.json({ batches });
 });
