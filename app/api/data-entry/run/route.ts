@@ -53,7 +53,10 @@ export const POST = withRevops(async (request: Request) => {
         record_id: recordId,
         record_type: objectType,
         dry_run: dryRun,
-        field_groups: fieldGroups ?? null,
+        // Only include field_groups when it's a real array — the agent's input
+        // schema requires `field_groups` to be an array, so sending `null`
+        // (the default-absent case) fails validation: "field_groups must be array".
+        ...(fieldGroups && fieldGroups.length > 0 ? { field_groups: fieldGroups } : {}),
       },
       dry_run: dryRun,
       enqueued_by: ctx.email ?? 'ui',
