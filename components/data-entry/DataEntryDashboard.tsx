@@ -5,13 +5,25 @@ import Link from 'next/link';
 import { StatusBadge, DryRunBadge } from './StatusBadge';
 import type { BatchListItem, QueueItem, HistoryRow } from './types';
 
-const TRIGGER_FILTERS = ['all', 'manual', 'webhook'] as const;
+// Run History filter pills. Values are mapped 1:1 to runs.agent_runs.trigger_kind
+// ('manual' = UI Quick Run / backfill, 'event' = Salesforce-triggered). 'all' is
+// the no-filter sentinel. There is NO 'webhook' trigger_kind — that pill used to
+// match nothing.
+const TRIGGER_FILTERS = ['all', 'manual', 'event'] as const;
+
+const FILTER_LABELS: Record<string, string> = {
+  all: 'All',
+  manual: 'Manual',
+  event: 'Salesforce',
+};
 
 export default function DataEntryDashboard() {
   // ── Quick Run form ────────────────────────────────────
   const [recordId, setRecordId] = useState('');
   const [objectType, setObjectType] = useState<'Lead' | 'Opportunity'>('Lead');
-  const [dryRun, setDryRun] = useState(false);
+  // Default to dry-run ON to match the backend safe default — the user opts into
+  // Live writes deliberately via the Mode toggle.
+  const [dryRun, setDryRun] = useState(true);
   const [running, setRunning] = useState(false);
   const [runStatus, setRunStatus] = useState<string | null>(null);
 
@@ -27,8 +39,10 @@ export default function DataEntryDashboard() {
     setLoadingHistory(true);
     setHistoryError(null);
 
+    // The pill value IS the trigger_kind ('manual' | 'event'); pass it straight
+    // through as the server trigger_type param for any non-'all' filter.
     const batchParams = new URLSearchParams({ limit: '100' });
-    if (activeFilter !== 'all' && activeFilter !== 'webhook') {
+    if (activeFilter !== 'all') {
       batchParams.set('trigger_type', activeFilter);
     }
 
@@ -70,15 +84,18 @@ export default function DataEntryDashboard() {
     return rows;
   })();
 
+  // The pill value (typeFilter) is the trigger_kind we filter on — the same value
+  // we pass to the server above, so the two passes can't diverge. Batch rows match
+  // on trigger_type (= trigger_kind). Queued rows have no completed run yet:
+  // dispatch_queue is the UI/backfill (manual) path, so keep them under 'manual'
+  // and exclude them under 'event' (Salesforce events never hit the queue).
   const filteredRows = typeFilter === 'all'
     ? historyRows
-    : typeFilter === 'webhook'
-      ? historyRows.filter(
-          (r) =>
-            (r.kind === 'queued' && r.data.trigger_event === 'webhook') ||
-            (r.kind === 'batch' && r.data.trigger_type === 'webhook'),
-        )
-      : historyRows.filter((r) => r.kind === 'batch' && r.data.trigger_type === typeFilter);
+    : historyRows.filter((r) =>
+        r.kind === 'queued'
+          ? typeFilter === 'manual'
+          : r.data.trigger_type === typeFilter,
+      );
 
   const [processingQueueId, setProcessingQueueId] = useState<string | null>(null);
   const [processedQueueId, setProcessedQueueId] = useState<string | null>(null);
@@ -243,7 +260,7 @@ export default function DataEntryDashboard() {
                       : 'bg-muted text-muted-foreground hover:text-foreground'
                   }`}
                 >
-                  {t === 'all' ? 'All' : t}
+                  {FILTER_LABELS[t] ?? t}
                 </button>
               ))}
             </div>
@@ -301,7 +318,9 @@ export default function DataEntryDashboard() {
           </div>
         ) : filteredRows.length === 0 ? (
           <p className="mt-4 text-sm text-muted-foreground">
-            {typeFilter === 'all' ? 'No runs yet. Start one above.' : `No ${typeFilter} runs found.`}
+            {typeFilter === 'all'
+              ? 'No runs yet. Start one above.'
+              : `No ${(FILTER_LABELS[typeFilter] ?? typeFilter).toLowerCase()} runs found.`}
           </p>
         ) : (
           <table className="mt-4 w-full text-sm">

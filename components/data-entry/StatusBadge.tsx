@@ -1,30 +1,58 @@
 'use client';
 
-const STATUS_STYLES: Record<string, string> = {
-  pending: 'bg-amber-100 text-amber-800',
-  dispatching: 'bg-blue-100 text-blue-800',
-  dispatched: 'bg-green-100 text-green-800',
-  running: 'bg-blue-100 text-blue-800',
-  completed: 'bg-green-100 text-green-800',
-  failed: 'bg-red-100 text-red-800',
-  waiting: 'bg-amber-100 text-amber-800',
-  processing: 'bg-blue-100 text-blue-800',
-  cancelled: 'bg-gray-100 text-gray-800',
+/**
+ * Per-status visual treatment. Covers the full runs.run_status enum (running,
+ * completed, failed, sleeping, awaiting_approval, awaiting_reply,
+ * awaiting_subagents, cancelled) AND the runs.dispatch_queue statuses
+ * (pending, dispatching, dispatched, dead) the UI surfaces. `pulse` marks an
+ * in-flight state; `label` is the human-facing text so a badge NEVER renders
+ * raw snake_case.
+ */
+type StatusStyle = { className: string; label: string; pulse?: 'blue' | 'amber' };
+
+const STATUS_STYLES: Record<string, StatusStyle> = {
+  // ── Run lifecycle ──
+  running: { className: 'bg-blue-100 text-blue-800', label: 'Running', pulse: 'blue' },
+  completed: { className: 'bg-green-100 text-green-800', label: 'Completed' },
+  failed: { className: 'bg-red-100 text-red-800', label: 'Failed' },
+  cancelled: { className: 'bg-gray-100 text-gray-800', label: 'Cancelled' },
+  // Lead/Opp runs sleep ~2h after trigger; the dominant in-flight state.
+  sleeping: { className: 'bg-amber-100 text-amber-800', label: 'Waiting', pulse: 'amber' },
+  awaiting_reply: { className: 'bg-amber-100 text-amber-800', label: 'Awaiting transcript', pulse: 'amber' },
+  awaiting_subagents: { className: 'bg-amber-100 text-amber-800', label: 'Awaiting sub-agents', pulse: 'amber' },
+  awaiting_approval: { className: 'bg-blue-100 text-blue-800', label: 'Awaiting approval', pulse: 'blue' },
+  // ── Dispatch queue ──
+  pending: { className: 'bg-gray-100 text-gray-800', label: 'Pending' },
+  dispatching: { className: 'bg-blue-100 text-blue-800', label: 'Dispatching', pulse: 'blue' },
+  dispatched: { className: 'bg-green-100 text-green-800', label: 'Dispatched' },
+  dead: { className: 'bg-red-100 text-red-800', label: 'Dead' },
+  // ── Legacy/alias statuses kept for compatibility ──
+  waiting: { className: 'bg-amber-100 text-amber-800', label: 'Waiting', pulse: 'amber' },
+  processing: { className: 'bg-blue-100 text-blue-800', label: 'Processing', pulse: 'blue' },
 };
 
+/** Humanize any unmapped status so the badge never shows raw snake_case. */
+function humanizeStatus(status: string): string {
+  if (!status) return 'Unknown';
+  return status
+    .replace(/_/g, ' ')
+    .replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
 export function StatusBadge({ status }: { status: string }) {
-  const style = STATUS_STYLES[status] ?? 'bg-gray-100 text-gray-800';
-  const bluePulse = status === 'running' || status === 'processing' || status === 'dispatching';
-  const amberPulse = status === 'waiting' || status === 'pending';
+  const entry = STATUS_STYLES[status];
+  const className = entry?.className ?? 'bg-gray-100 text-gray-800';
+  const label = entry?.label ?? humanizeStatus(status);
+  const pulse = entry?.pulse;
   return (
-    <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ${style}`}>
-      {bluePulse && (
+    <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ${className}`}>
+      {pulse === 'blue' && (
         <span aria-hidden="true" className="mr-1 h-1.5 w-1.5 animate-pulse rounded-full bg-blue-600" />
       )}
-      {amberPulse && (
+      {pulse === 'amber' && (
         <span aria-hidden="true" className="mr-1 h-1.5 w-1.5 animate-pulse rounded-full bg-amber-600" />
       )}
-      {status}
+      {label}
     </span>
   );
 }

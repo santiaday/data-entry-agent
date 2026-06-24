@@ -38,6 +38,14 @@ export function confidenceToNumber(c: unknown): number | null {
 // ── runs.agent_runs → RunListItem ─────────────────────────────────
 export function mapRun(row: Record<string, any>, counts?: {
   extracted?: number; written?: number; skipped?: number; errored?: number;
+  /**
+   * Authoritative per-run dry_run signal, derived from runs.field_extractions
+   * (bool_or(dry_run) OR any write_outcome='dry_run'). Pass this whenever the
+   * extraction rows are available — trigger_payload.dry_run is UNRELIABLE for
+   * Salesforce-triggered (event) runs, whose raw SF payload carries no dry_run
+   * key, so reading it alone mislabels every event run as a LIVE write.
+   */
+  dryRun?: boolean | null;
 }) {
   const tp = (row.trigger_payload ?? {}) as Record<string, any>;
   return {
@@ -45,7 +53,7 @@ export function mapRun(row: Record<string, any>, counts?: {
     record_id: row.subject_id ?? tp.record_id ?? null,
     object_type: tp.record_type ?? row.subject_kind ?? null,
     status: row.status,
-    dry_run: tp.dry_run === true || tp.dry_run === 'true',
+    dry_run: resolveDryRun(tp, counts?.dryRun),
     fields_extracted: counts?.extracted ?? 0,
     fields_written: counts?.written ?? 0,
     fields_skipped: counts?.skipped ?? 0,
@@ -56,6 +64,36 @@ export function mapRun(row: Record<string, any>, counts?: {
     error: row.error ? (typeof row.error === 'string' ? row.error : (row.error.message ?? JSON.stringify(row.error))) : null,
     created_at: row.started_at ?? row.created_at ?? null,
   };
+}
+
+/**
+ * Resolve a run's dry_run flag. The per-run extraction-derived signal (`fromRows`)
+ * is authoritative when present; otherwise fall back to trigger_payload.dry_run.
+ * When neither is available (e.g. a run with no extraction rows yet and an event
+ * payload that omits the key), default to TRUE to match the backend's dry-run
+ * default — never silently claim a run wrote live to Salesforce.
+ */
+function resolveDryRun(
+  tp: Record<string, any>,
+  fromRows?: boolean | null,
+): boolean {
+  if (typeof fromRows === 'boolean') return fromRows;
+  if (tp.dry_run === true || tp.dry_run === 'true') return true;
+  if (tp.dry_run === false || tp.dry_run === 'false') return false;
+  return true;
+}
+
+/**
+ * Derive a run's authoritative dry_run from its extraction rows. A run is a dry
+ * run if any row was recorded dry_run OR produced write_outcome='dry_run'. With
+ * no rows the caller should treat the result as "unknown" — returns null so
+ * mapRun can fall back to the trigger payload (and ultimately the safe default).
+ */
+export function extractionDryRun(
+  rows: Array<{ dry_run?: boolean | null; write_outcome?: string | null }>,
+): boolean | null {
+  if (rows.length === 0) return null;
+  return rows.some((r) => r.dry_run === true || r.write_outcome === 'dry_run');
 }
 
 // ── runs.field_extractions → ExtractionRow ────────────────────────
@@ -82,8 +120,14 @@ export function mapExtraction(row: Record<string, any>) {
   };
 }
 
-/** Roll up extraction rows into the per-run counts the UI shows. */
-export function extractionCounts(rows: Array<{ write_outcome?: string | null }>) {
+/**
+ * Roll up extraction rows into the per-run counts the UI shows. Also reports the
+ * authoritative `dryRun` (null when there are no rows) so callers can pass the
+ * whole object straight into mapRun without a second pass.
+ */
+export function extractionCounts(
+  rows: Array<{ write_outcome?: string | null; dry_run?: boolean | null }>,
+) {
   let extracted = 0, written = 0, skipped = 0, errored = 0;
   for (const r of rows) {
     const o = r.write_outcome ?? '';
@@ -92,7 +136,7 @@ export function extractionCounts(rows: Array<{ write_outcome?: string | null }>)
     else if (o === 'invalid' || o === 'sf_rejected' || o === 'write_silently_dropped' || o === 'write_failed') errored++;
     else skipped++;
   }
-  return { extracted, written, skipped, errored };
+  return { extracted, written, skipped, errored, dryRun: extractionDryRun(rows) };
 }
 
 // ── runs.dispatch_queue → QueueItem ───────────────────────────────
