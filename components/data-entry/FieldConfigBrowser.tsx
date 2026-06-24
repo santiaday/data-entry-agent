@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useState, useMemo, useCallback } from 'react';
+import { apiFetch } from '@/lib/api/client';
 
 type FieldConfigRow = {
   id: string;                           // DB uuid
@@ -47,7 +48,7 @@ export default function FieldConfigBrowser() {
   const load = useCallback(() => {
     setLoading(true);
     setLoadError(null);
-    fetch('/api/data-entry/fields')
+    apiFetch('/fields')
       .then(async (r) => {
         if (!r.ok) {
           const body = await r.json().catch(() => ({}));
@@ -230,7 +231,7 @@ export default function FieldConfigBrowser() {
                           if (!confirm(`Deactivate ${field.field_name}? It won't be deleted, just skipped at run time.`)) return;
                           setActionError(null);
                           try {
-                            const res = await fetch(`/api/data-entry/fields/${field.id}`, { method: 'DELETE' });
+                            const res = await apiFetch(`/fields/${field.id}`, { method: 'DELETE' });
                             if (!res.ok) {
                               const body = await res.json().catch(() => ({}));
                               throw new Error(body.error ?? `Disable failed (${res.status})`);
@@ -244,7 +245,7 @@ export default function FieldConfigBrowser() {
                           if (!confirm(`Reactivate ${field.field_name}? It will be extracted again on the next run.`)) return;
                           setActionError(null);
                           try {
-                            const res = await fetch(`/api/data-entry/fields/${field.id}`, {
+                            const res = await apiFetch(`/fields/${field.id}`, {
                               method: 'PUT',
                               headers: { 'Content-Type': 'application/json' },
                               body: JSON.stringify({ isActive: true }),
@@ -416,8 +417,8 @@ function FieldForm({
         validation: Object.keys(validation).length > 0 ? validation : undefined,
       };
 
-      const response = await fetch(
-        isEdit ? `/api/data-entry/fields/${existing.id}` : '/api/data-entry/fields',
+      const response = await apiFetch(
+        isEdit ? `/fields/${existing.id}` : '/fields',
         {
           method: isEdit ? 'PUT' : 'POST',
           headers: { 'Content-Type': 'application/json' },

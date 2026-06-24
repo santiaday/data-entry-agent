@@ -2,6 +2,7 @@
 
 import { useEffect, useState, useCallback } from 'react';
 import Link from 'next/link';
+import { apiFetch } from '@/lib/api/client';
 import { StatusBadge, DryRunBadge } from './StatusBadge';
 import type { RunListItem, QueueItem } from './types';
 
@@ -22,8 +23,8 @@ export default function SearchByRecordId({ initialRecordId }: { initialRecordId:
     setSearchError(null);
     try {
       const [runRes, queueRes] = await Promise.all([
-        fetch(`/api/data-entry/search?recordId=${encodeURIComponent(rid.trim())}`),
-        fetch(`/api/data-entry/queue?recordId=${encodeURIComponent(rid.trim())}`),
+        apiFetch(`/search?recordId=${encodeURIComponent(rid.trim())}`),
+        apiFetch(`/queue?recordId=${encodeURIComponent(rid.trim())}`),
       ]);
       if (!runRes.ok || !queueRes.ok) {
         const failed = !runRes.ok ? runRes : queueRes;
@@ -48,7 +49,7 @@ export default function SearchByRecordId({ initialRecordId }: { initialRecordId:
   async function handleProcessNow(queueId: string) {
     setProcessingQueueId(queueId);
     try {
-      const res = await fetch(`/api/data-entry/queue/${queueId}/skip`, { method: 'POST' });
+      const res = await apiFetch(`/queue/${queueId}/skip`, { method: 'POST' });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
         setSearchError(data.error ?? 'Re-queue failed');
