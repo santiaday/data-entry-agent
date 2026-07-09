@@ -2,9 +2,10 @@
 
 import { useCallback, useEffect, useState } from 'react';
 import { apiFetch } from '@/lib/api/client';
-import type { Analytics } from './analytics/types';
+import type { Analytics, FieldHealth } from './analytics/types';
 import { HeaderKpis } from './analytics/HeaderKpis';
 import { FieldHealthTable, type FieldChip } from './analytics/FieldHealthTable';
+import { FieldRecordsDrawer } from './analytics/FieldRecordsDrawer';
 import { ErrorAnalytics } from './analytics/ErrorAnalytics';
 import { RunHealth } from './analytics/RunHealth';
 
@@ -27,6 +28,9 @@ export default function AnalyticsView() {
 
   // Client-side Field-Health chips.
   const [chips, setChips] = useState<Set<FieldChip>>(new Set());
+
+  // GTM-1431: the field currently open in the error drill-down drawer.
+  const [selectedField, setSelectedField] = useState<FieldHealth | null>(null);
 
   const load = useCallback(() => {
     setLoading(true);
@@ -157,13 +161,27 @@ export default function AnalyticsView() {
       />
 
       {/* ── 1. Field Health (centerpiece) ── */}
-      <FieldHealthTable fields={analytics.fieldHealth} chips={chips} onToggleChip={toggleChip} />
+      <FieldHealthTable
+        fields={analytics.fieldHealth}
+        chips={chips}
+        onToggleChip={toggleChip}
+        onSelectField={setSelectedField}
+      />
 
       {/* ── 2. Error Analytics ── */}
       <ErrorAnalytics data={analytics.errors} />
 
       {/* ── 3. Run Health ── */}
       <RunHealth data={analytics.runs} />
+
+      {selectedField && (
+        <FieldRecordsDrawer
+          sfObject={selectedField.sfObject}
+          fieldApiName={selectedField.fieldApiName}
+          days={days}
+          onClose={() => setSelectedField(null)}
+        />
+      )}
     </div>
   );
 }
