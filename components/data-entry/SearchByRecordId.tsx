@@ -4,6 +4,7 @@ import { useEffect, useState, useCallback } from 'react';
 import Link from 'next/link';
 import { apiFetch } from '@/lib/api/client';
 import { StatusBadge, DryRunBadge } from './StatusBadge';
+import { RecordFieldBreakdown } from './RecordFieldBreakdown';
 import type { RunListItem, QueueItem } from './types';
 
 type RunWithError = RunListItem & { error: string | null };
@@ -237,6 +238,8 @@ export default function SearchByRecordId({ initialRecordId }: { initialRecordId:
           </div>
         </div>
       )}
+
+      {!loading && runs.length > 0 && <RecordFieldBreakdown recordId={recordId} />}
     </div>
   );
 }

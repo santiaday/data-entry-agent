@@ -35,6 +35,7 @@ export type RunListItem = {
 
 export type ExtractionRow = {
   id: string;
+  field_key: string;
   field_name: string;
   sf_object: string;
   batch_id: string;
@@ -43,11 +44,13 @@ export type ExtractionRow = {
   actual_sf_value_after_write: string | null;
   write_mode: string;
   confidence: number | null;
+  confidence_label: string | null;
   evidence: string | null;
   was_written: boolean;
   write_outcome: string | null;
   skip_reason: string | null;
   validation_errors: string[] | null;
+  dry_run: boolean;
   created_at: string;
 };
 

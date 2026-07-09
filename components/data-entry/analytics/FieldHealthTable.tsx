@@ -43,10 +43,12 @@ export function FieldHealthTable({
   fields,
   chips,
   onToggleChip,
+  onSelectField,
 }: {
   fields: FieldHealth[];
   chips: Set<FieldChip>;
   onToggleChip: (c: FieldChip) => void;
+  onSelectField: (f: FieldHealth) => void;
 }) {
   const [sortKey, setSortKey] = useState<SortKey>('attention');
   const [sortDir, setSortDir] = useState<SortDir>('desc');
@@ -171,7 +173,11 @@ export function FieldHealthTable({
               return (
                 <tr
                   key={`${f.sfObject}-${f.fieldApiName}`}
-                  className="border-b last:border-0 align-top transition hover:bg-accent/50"
+                  onClick={() => onSelectField(f)}
+                  role="button"
+                  tabIndex={0}
+                  onKeyDown={(e) => e.key === 'Enter' && onSelectField(f)}
+                  className="cursor-pointer border-b last:border-0 align-top transition hover:bg-accent/50"
                 >
                   <td className="py-2 pr-3 font-mono text-xs">{f.fieldApiName}</td>
                   <td className="py-2 pr-3 text-xs">
