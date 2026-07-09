@@ -3,6 +3,34 @@
  * The shapes mirror the GET /api/data-entry/analytics response exactly.
  */
 
+import type { ExtractionRow } from '../types';
+
+/**
+ * GTM-1431 field error drill-down responses. Unlike the rest of this file
+ * (which mirrors /analytics' fully camelCased shaping), these two mirror
+ * GET /field-records and GET /record-fields, which return the raw
+ * mapExtraction() shape (snake_case) — same convention RunDetailView
+ * already reads (`ext.write_outcome`, not `ext.writeOutcome`).
+ */
+export type FieldRecordRow = ExtractionRow & {
+  record_id: string;
+  subject_kind: string | null;
+  run_id: string;
+  run_status: string;
+  run_started_at: string;
+};
+
+export type FieldRecordsResponse = { records: FieldRecordRow[]; hasMore: boolean };
+
+export type RecordFieldRow = ExtractionRow & { group_key: string | null };
+
+export type RecordFieldsResponse = {
+  run_id: string | null;
+  run_status: string | null;
+  run_started_at: string | null;
+  fields: RecordFieldRow[];
+};
+
 export type Attention =
   | 'never_extracted'
   | 'high_error'
